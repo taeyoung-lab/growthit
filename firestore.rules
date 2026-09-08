@@ -3,12 +3,19 @@ rules_version = '2';
 // ============================================================================
 // Firestore 보안 규칙
 //
-// 설계 원칙 (기획서 10장·29장 대응):
-// 1. 회의 접근 권한은 meetings/{meetingId}/permissions/{uid} 문서의 존재 여부와 role로 판단합니다.
-//    같은 회사(organization_id)가 아니어도 permissions 문서가 있으면 VIEWER로 접근 가능 — 외부 공유 대응.
-// 2. 조직/부서/사용자 관리(회원관리, 5장)와 공유 링크 발급(24~26장)은 비밀번호 해시·서비스 계정 키를
+// 설계 원칙 (기획서 10장·29장 대응, 2026-09-08 권한 체계 개편 반영):
+// 1. 계정 권한(org_role)은 SUPER_ADMIN(모든 기능+관리 기능+전체 컨텐츠) /
+//    ADMIN(전체 컨텐츠 열람만) / USER(회의록 단위 권한) 3단계입니다.
+// 2. 회의 접근 권한은 기본적으로 meetings/{meetingId}/permissions/{uid} 문서의 존재 여부와
+//    role로 판단하되, org_role이 SUPER_ADMIN/ADMIN이면 permissions 문서가 없어도 조회 가능합니다.
+//    "열람자"는 별도 계정 권한이 아니라 permissions 서브컬렉션에 VIEWER로 등록되는
+//    기존 회의별 외부 공유(MeetingShare) 기능을 그대로 사용합니다.
+// 3. 조직/부서/사용자 관리(회원관리, 5장)와 공유 링크 발급(24~26장)은 비밀번호 해시·서비스 계정 키를
 //    다루므로 전부 서버(Admin SDK, 규칙을 우회)에서만 쓰도록 하고, 클라이언트 쓰기는 막습니다.
-// 3. 결정 이력(decisions/{id}/history)은 절대 수정·삭제할 수 없고 새로 추가만 가능합니다(16장).
+// 4. 결정 이력(decisions/{id}/history)은 절대 수정·삭제할 수 없고 새로 추가만 가능합니다(16장).
+// 5. Cloud Functions를 쓰지 않으므로(Spark 요금제 유지), meetings.member_uids는
+//    permissions 서브컬렉션에 쓰는 모든 서버 코드가 직접 함께 갱신해야 합니다
+//    (src/lib/firebase/meetingAccess.ts 헬퍼 사용).
 // ============================================================================
 
 function isSignedIn() {
@@ -23,8 +30,18 @@ function myOrgId() {
   return myProfile().organization_id;
 }
 
+function isSuperAdmin() {
+  return isSignedIn() && myProfile().org_role == 'SUPER_ADMIN';
+}
+
+// 관리 기능(인원관리 등)에 접근 가능한지 — SUPER_ADMIN만 해당
 function isOrgAdmin() {
-  return isSignedIn() && myProfile().org_role == 'ORG_ADMIN';
+  return isSuperAdmin();
+}
+
+// 전체 컨텐츠 열람 가능 여부 — SUPER_ADMIN, ADMIN 둘 다 해당 (관리 기능 여부와 무관)
+function canViewAllContent() {
+  return isSignedIn() && myProfile().org_role in ['SUPER_ADMIN', 'ADMIN'];
 }
 
 function sameOrg(orgId) {
@@ -35,23 +52,26 @@ function meetingPermission(meetingId) {
   return get(/databases/$(database)/documents/meetings/$(meetingId)/permissions/$(request.auth.uid)).data;
 }
 
+function hasMeetingPermissionDoc(meetingId) {
+  return exists(/databases/$(database)/documents/meetings/$(meetingId)/permissions/$(request.auth.uid));
+}
+
+// 회의 열람 가능 여부: 회의별 권한(편집자/참여자/열람자) 보유 OR 전체 컨텐츠 열람 권한(SUPER_ADMIN/ADMIN)
 function hasMeetingAccess(meetingId) {
-  return isSignedIn() &&
-    exists(/databases/$(database)/documents/meetings/$(meetingId)/permissions/$(request.auth.uid));
+  return isSignedIn() && (hasMeetingPermissionDoc(meetingId) || canViewAllContent());
 }
 
 function meetingRoleIn(meetingId, roles) {
-  return isSignedIn() &&
-    exists(/databases/$(database)/documents/meetings/$(meetingId)/permissions/$(request.auth.uid)) &&
-    meetingPermission(meetingId).role in roles;
+  return isSignedIn() && hasMeetingPermissionDoc(meetingId) && meetingPermission(meetingId).role in roles;
 }
 
+// 회의 편집 가능 여부: 편집자(AUTHOR)/참여자(PARTICIPANT) 또는 SUPER_ADMIN(모든 기능 접근)
 function canEditMeeting(meetingId) {
-  return meetingRoleIn(meetingId, ['AUTHOR', 'PARTICIPANT']);
+  return meetingRoleIn(meetingId, ['AUTHOR', 'PARTICIPANT']) || isSuperAdmin();
 }
 
 function isMeetingAuthor(meetingId) {
-  return meetingRoleIn(meetingId, ['AUTHOR']);
+  return meetingRoleIn(meetingId, ['AUTHOR']) || isSuperAdmin();
 }
 
 match /databases/{database}/documents {
@@ -59,7 +79,7 @@ match /databases/{database}/documents {
   // ---- 조직 / 부서 : 서버(관리자 API)에서만 생성·수정. 같은 회사 구성원은 조회만 가능 ----
   match /organizations/{orgId} {
     allow read: if sameOrg(orgId);
-    allow write: if false; // Admin SDK 경유 (Cloud Function / API route)만 허용
+    allow write: if false; // Admin SDK 경유 (API route)만 허용
   }
 
   match /departments/{deptId} {
@@ -67,7 +87,7 @@ match /databases/{database}/documents {
     allow write: if false;
   }
 
-  // ---- 사용자 프로필: 같은 회사 구성원 조회 가능. 생성/수정은 서버 전용 ----
+  // ---- 사용자 프로필: 같은 회사 구성원 조회 가능. 생성/수정/삭제(soft-delete)는 서버 전용 ----
   // (로그인 계정 생성과 프로필 생성이 함께 이루어져야 하므로 /api/admin/users 라우트에서 처리)
   match /users/{uid} {
     allow read: if isSignedIn() && (request.auth.uid == uid || sameOrg(resource.data.organization_id));
@@ -79,7 +99,7 @@ match /databases/{database}/documents {
     allow read: if isSignedIn() && sameOrg(resource.data.organization_id);
     allow create: if isSignedIn() && sameOrg(request.resource.data.organization_id);
     allow update, delete: if isSignedIn() &&
-      (isOrgAdmin() || sameOrg(resource.data.organization_id));
+      (isSuperAdmin() || sameOrg(resource.data.organization_id));
   }
 
   // ---- 회의 ----
@@ -87,7 +107,7 @@ match /databases/{database}/documents {
     allow read: if hasMeetingAccess(meetingId);
     allow create: if isSignedIn() && sameOrg(request.resource.data.organization_id) &&
       request.auth.uid in request.resource.data.member_uids;
-    // member_uids는 Cloud Functions(permissions 서브컬렉션 트리거)가 관리하므로
+    // member_uids는 서버 API(Admin SDK)가 permissions 서브컬렉션 쓰기와 함께 직접 갱신하므로
     // 클라이언트의 update에서는 이 필드를 건드릴 수 없게 막습니다.
     allow update: if canEditMeeting(meetingId) &&
       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['member_uids']);
@@ -98,7 +118,7 @@ match /databases/{database}/documents {
       allow write: if canEditMeeting(meetingId);
     }
 
-    // 권한 문서 자체는 AUTHOR만 관리. 단, 최초 생성(회의 생성 직후 자기 자신을 AUTHOR로 등록)은 예외 허용.
+    // 권한 문서 자체는 편집자(AUTHOR)만 관리. 단, 최초 생성(회의 생성 직후 자기 자신을 AUTHOR로 등록)은 예외 허용.
     match /permissions/{userId} {
       allow read: if hasMeetingAccess(meetingId);
       allow create: if isSignedIn() &&
@@ -108,20 +128,9 @@ match /databases/{database}/documents {
       allow update, delete: if isMeetingAuthor(meetingId);
     }
 
-    // 공유 설정: 비밀번호 해시를 담고 있어 AUTHOR만 read/write. 실제 공유 접속 검증은 서버 API에서 처리.
+    // 공유 설정(=열람자 발급): 비밀번호 해시를 담고 있어 편집자만 read/write. 실제 공유 접속 검증은 서버 API에서 처리.
     match /shares/{shareId} {
       allow read, write: if isMeetingAuthor(meetingId);
-    }
-  }
-
-  // ---- 회의록 텍스트 원문 / 발화 세그먼트 ----
-  match /transcripts/{meetingId} {
-    allow read: if hasMeetingAccess(meetingId);
-    allow write: if canEditMeeting(meetingId);
-
-    match /segments/{segmentId} {
-      allow read: if hasMeetingAccess(meetingId);
-      allow write: if canEditMeeting(meetingId);
     }
   }
 
@@ -130,10 +139,10 @@ match /databases/{database}/documents {
     allow write: if canEditMeeting(meetingId);
   }
 
-  // ---- 질의 ----
+  // ---- 질의(문답) : 회의 상세 화면에서 직접 작성 ----
   match /questions/{questionId} {
     allow read: if hasMeetingAccess(resource.data.meeting_id);
-    allow create: if canEditMeeting(request.resource.data.meeting_id);
+    allow create: if hasMeetingAccess(request.resource.data.meeting_id);
     allow update: if canEditMeeting(resource.data.meeting_id) ||
       // 담당자 본인은 상태 변경(답변 처리 등)을 위해 수정 가능
       (isSignedIn() && resource.data.assignee_user_id == request.auth.uid);
@@ -141,7 +150,7 @@ match /databases/{database}/documents {
 
     match /answers/{answerId} {
       allow read: if hasMeetingAccess(get(/databases/$(database)/documents/questions/$(questionId)).data.meeting_id);
-      allow create: if canEditMeeting(request.resource.data.source_meeting_id);
+      allow create: if hasMeetingAccess(request.resource.data.source_meeting_id);
       allow update, delete: if isSignedIn() && resource.data.answerer_user_id == request.auth.uid;
     }
   }
@@ -160,7 +169,7 @@ match /databases/{database}/documents {
     }
   }
 
-  // ---- 액션 아이템 ----
+  // ---- 향후추진과제 (ActionItem) : 상태는 회의 상세 화면에서 직접 관리 ----
   match /actionItems/{itemId} {
     allow read: if hasMeetingAccess(resource.data.meeting_id);
     allow create: if canEditMeeting(request.resource.data.meeting_id);
@@ -175,14 +184,6 @@ match /databases/{database}/documents {
       hasMeetingAccess(resource.data.child_meeting_id);
     allow create: if canEditMeeting(request.resource.data.child_meeting_id);
     allow update, delete: if canEditMeeting(resource.data.child_meeting_id);
-  }
-
-  // ---- 알림: 본인 것만 읽고, 읽음 처리(update)만 가능. 생성은 Cloud Functions(Admin SDK) 전용 ----
-  match /notifications/{notificationId} {
-    allow read: if isSignedIn() && resource.data.user_id == request.auth.uid;
-    allow update: if isSignedIn() && resource.data.user_id == request.auth.uid &&
-      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['is_read', 'read_at']);
-    allow create, delete: if false;
   }
 
   // ---- 공유 접근 로그: 서버 전용 ----

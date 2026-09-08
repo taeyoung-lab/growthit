@@ -28,6 +28,14 @@
       "collectionGroup": "questions",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "meeting_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "questions",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "assignee_user_id", "order": "ASCENDING" },
         { "fieldPath": "question_status", "order": "ASCENDING" },
         { "fieldPath": "due_date", "order": "ASCENDING" }
@@ -46,6 +54,22 @@
       "collectionGroup": "actionItems",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "meeting_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "actionItems",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organization_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "actionItems",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "assignee_user_ids", "arrayConfig": "CONTAINS" },
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "due_date", "order": "ASCENDING" }
@@ -55,15 +79,6 @@
       "collectionGroup": "shares",
       "queryScope": "COLLECTION_GROUP",
       "fields": [{ "fieldPath": "share_token", "order": "ASCENDING" }]
-    },
-    {
-      "collectionGroup": "notifications",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "user_id", "order": "ASCENDING" },
-        { "fieldPath": "is_read", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "DESCENDING" }
-      ]
     }
   ],
   "fieldOverrides": []
