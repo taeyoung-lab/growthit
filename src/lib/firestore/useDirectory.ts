@@ -28,17 +28,24 @@ export function useDirectory(organizationId: string | undefined): Directory {
     let cancelled = false;
 
     async function load() {
-      const usersSnap = await getDocs(query(collection(db, "users"), where("organization_id", "==", organizationId)));
-      const deptSnap = await getDocs(
-        query(collection(db, "departments"), where("organization_id", "==", organizationId))
-      );
-      const orgSnap = await getDocs(collection(db, "organizations"));
-      if (cancelled) return;
+      try {
+        const usersSnap = await getDocs(query(collection(db, "users"), where("organization_id", "==", organizationId)));
+        const deptSnap = await getDocs(
+          query(collection(db, "departments"), where("organization_id", "==", organizationId))
+        );
+        const orgSnap = await getDocs(collection(db, "organizations"));
+        if (cancelled) return;
 
-      setUsers(Object.fromEntries(usersSnap.docs.map((d) => [d.id, d.data() as UserProfile])));
-      setDepartments(Object.fromEntries(deptSnap.docs.map((d) => [d.id, d.data() as Department])));
-      setOrganizations(Object.fromEntries(orgSnap.docs.map((d) => [d.id, d.data() as Organization])));
-      setLoading(false);
+        setUsers(Object.fromEntries(usersSnap.docs.map((d) => [d.id, d.data() as UserProfile])));
+        setDepartments(Object.fromEntries(deptSnap.docs.map((d) => [d.id, d.data() as Department])));
+        setOrganizations(Object.fromEntries(orgSnap.docs.map((d) => [d.id, d.data() as Organization])));
+      } catch (error) {
+        // 조회 실패 시에도 로딩 상태가 영원히 true로 남아 화면(담당주체 선택 등)이
+        // 빈 채로 멈춰 보이지 않도록 합니다.
+        console.error("[useDirectory] 조직 구성원/부서 조회 실패:", error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
     load();
     return () => {
