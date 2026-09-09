@@ -7,7 +7,7 @@ import { auth } from "@/lib/firebase/client";
 import { AuthGate } from "@/components/AuthGate";
 import { authedFetch } from "@/lib/apiClient";
 
-// 5장: 초기 비밀번호(1234)로 로그인한 사용자는 최초 접속 시 반드시 이 화면에서
+// 5장: 초기 비밀번호(123456)로 로그인한 사용자는 최초 접속 시 반드시 이 화면에서
 // 새 비밀번호를 설정해야 합니다 (2회 입력으로 확인).
 function ChangePasswordContent() {
   const [pw, setPw] = useState("");
@@ -24,7 +24,7 @@ function ChangePasswordContent() {
     setError(null);
     if (pw.length < 8) return setError("비밀번호는 8자 이상이어야 합니다.");
     if (pw !== pwConfirm) return setError("비밀번호가 일치하지 않습니다.");
-    if (pw === "1234") return setError("초기 비밀번호와 다른 비밀번호로 설정해주세요.");
+    if (pw === "123456") return setError("초기 비밀번호와 다른 비밀번호로 설정해주세요.");
 
     setSubmitting(true);
     try {
@@ -45,7 +45,7 @@ function ChangePasswordContent() {
       <div className="w-full max-w-sm card p-8">
         <h1 className="mb-1 text-xl font-bold text-navy">비밀번호 설정</h1>
         <p className="mb-6 text-sm text-gray-500">
-          초기 비밀번호(1234)로 로그인하셨습니다. 계속 진행하려면 새 비밀번호를 설정해주세요.
+          초기 비밀번호(123456)로 로그인하셨습니다. 계속 진행하려면 새 비밀번호를 설정해주세요.
         </p>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <div>
