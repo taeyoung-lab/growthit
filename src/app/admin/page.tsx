@@ -9,7 +9,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { authedFetch } from "@/lib/apiClient";
 import type { Department, Organization, OrgRole, UserProfile } from "@/lib/types";
 
-type Tab = "organizations" | "departments" | "users";
+type Tab = "organizations" | "departments" | "users" | "shareLogs";
 
 const ROLE_LABEL: Record<OrgRole, string> = {
   SUPER_ADMIN: "슈퍼 관리자",
@@ -62,6 +62,7 @@ function AdminContent() {
             ["organizations", "회사"],
             ["departments", "부서"],
             ["users", "사용자"],
+            ["shareLogs", "공유 로그"],
           ] as [Tab, string][]).map(([k, label]) => (
             <button
               key={k}
@@ -95,7 +96,63 @@ function AdminContent() {
             reload={loadAll}
           />
         )}
+        {tab === "shareLogs" && <ShareLogsTab />}
       </main>
+    </div>
+  );
+}
+
+interface ShareLog {
+  id: string;
+  accessed_at: number;
+  email: string;
+  access_result: "SUCCESS" | "FAILURE" | "EXPIRED" | "REVOKED";
+  ip_address: string | null;
+  meeting_title: string | null;
+}
+
+const SHARE_RESULT_LABEL: Record<ShareLog["access_result"], string> = {
+  SUCCESS: "성공",
+  FAILURE: "실패(이메일/비밀번호 불일치)",
+  EXPIRED: "만료된 링크",
+  REVOKED: "취소된 공유",
+};
+
+const SHARE_RESULT_BADGE: Record<ShareLog["access_result"], string> = {
+  SUCCESS: "text-emerald-600",
+  FAILURE: "text-red-600",
+  EXPIRED: "text-gray-400",
+  REVOKED: "text-gray-400",
+};
+
+function ShareLogsTab() {
+  const [logs, setLogs] = useState<ShareLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    authedFetch("/api/admin/share-logs")
+      .then((data) => setLogs(data.logs))
+      .catch((e) => setError(e instanceof Error ? e.message : "조회 실패"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <p className="p-8 text-center text-sm text-gray-400">불러오는 중…</p>;
+  if (error) return <p className="p-8 text-center text-sm text-red-600">{error}</p>;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="mb-2 text-xs text-gray-500">공유 링크로 접속을 시도한 최근 200건입니다. 슈퍼 관리자만 조회할 수 있습니다.</p>
+      {logs.map((l) => (
+        <div key={l.id} className="card flex items-center justify-between p-3 text-sm">
+          <div>
+            <p className="text-ink">{l.meeting_title || "(회의 특정 불가)"}</p>
+            <p className="text-xs text-gray-400">{l.email} · {new Date(l.accessed_at).toLocaleString("ko-KR")}{l.ip_address ? ` · ${l.ip_address}` : ""}</p>
+          </div>
+          <span className={`text-xs font-medium ${SHARE_RESULT_BADGE[l.access_result]}`}>{SHARE_RESULT_LABEL[l.access_result]}</span>
+        </div>
+      ))}
+      {logs.length === 0 && <p className="card p-6 text-center text-sm text-gray-400">접속 기록이 없습니다.</p>}
     </div>
   );
 }
@@ -337,7 +394,7 @@ function UserModal({
             organization_id: organizationId,
           }),
         });
-        onDone(`${email} 계정이 생성되었습니다. 초기 비밀번호는 1234이며, 최초 로그인 시 변경이 필요합니다.`);
+        onDone(`${email} 계정이 생성되었습니다. 초기 비밀번호는 123456이며, 최초 로그인 시 변경이 필요합니다.`);
       } else {
         await authedFetch("/api/admin/users", {
           method: "PATCH",
@@ -359,13 +416,13 @@ function UserModal({
 
   async function resetPassword() {
     if (!user) return;
-    if (!confirm(`${user.email}의 비밀번호를 초기값(1234)으로 되돌릴까요?`)) return;
+    if (!confirm(`${user.email}의 비밀번호를 초기값(123456)으로 되돌릴까요?`)) return;
     try {
       await authedFetch("/api/admin/users", {
         method: "PATCH",
         body: JSON.stringify({ uid: user.id, reset_password: true }),
       });
-      setResetMsg("비밀번호가 1234로 초기화되었습니다. 다음 로그인 시 재설정이 다시 요구됩니다.");
+      setResetMsg("비밀번호가 123456으로 초기화되었습니다. 다음 로그인 시 재설정이 다시 요구됩니다.");
     } catch (e) {
       alert(e instanceof Error ? e.message : "비밀번호 리셋 실패");
     }
@@ -411,14 +468,14 @@ function UserModal({
 
           {mode === "create" && (
             <p className="rounded-lg bg-gray-50 p-3 text-xs text-gray-500">
-              초기 비밀번호는 <span className="font-mono font-medium">1234</span>로 고정 발급되며,
+              초기 비밀번호는 <span className="font-mono font-medium">123456</span>으로 고정 발급되며,
               최초 로그인 시 비밀번호를 새로 설정해야 합니다(2회 입력 확인).
             </p>
           )}
           {mode === "edit" && (
             <div className="rounded-lg bg-gray-50 p-3">
               <button type="button" className="btn btn-secondary text-xs" onClick={resetPassword}>
-                비밀번호 리셋 (1234로 초기화)
+                비밀번호 리셋 (123456으로 초기화)
               </button>
               {resetMsg && <p className="mt-2 text-xs text-emerald-700">{resetMsg}</p>}
             </div>
