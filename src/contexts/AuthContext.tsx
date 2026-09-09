@@ -2,8 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { onAuthStateChanged, type User as FirebaseUser } from "firebase/auth";
-import { doc, getDoc, onSnapshot } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase/client";
+import { auth } from "@/lib/firebase/client";
 import type { UserProfile } from "@/lib/types";
 
 interface AuthContextValue {
@@ -36,41 +35,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!firebaseUser) return;
-    let settled = false;
-    const unsubProfile = onSnapshot(
-      doc(db, "users", firebaseUser.uid),
-      (snap) => {
-        settled = true;
-        setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-        setLoading(false);
-      },
-      (error) => {
-        // 프로필 조회 실패(권한/네트워크 등) 시에도 무한 로딩에 빠지지 않도록 처리합니다.
-        settled = true;
-        console.error("[AuthContext] 사용자 프로필 조회 실패:", error);
-        setProfile(null);
-        setLoading(false);
-      }
-    );
-    // 방어 코드: 네트워크 재연결 지연 등으로 실시간 구독(onSnapshot)이 성공도 실패도 아닌 채
-    // 계속 응답하지 않는 경우(2026-09-09 재현 확인 — 관리자 메뉴 미노출·프로젝트 생성 무반응의
-    // 실제 원인이었음), 5초 뒤에도 응답이 없으면 1회성 조회로 한 번 더 시도합니다.
-    const fallbackTimer = setTimeout(async () => {
-      if (settled) return;
+    let cancelled = false;
+
+    // 2026-09-09 재점검: 원래 이 프로필은 Firestore 실시간 구독(onSnapshot)으로 가져왔는데,
+    // 이 앱 전체를 통틀어 실시간 구독이 필요한 화면이 사실상 이것 하나뿐이었습니다. 그런데
+    // 이 구독 하나 때문에 매 페이지 진입마다 Firestore의 WebChannel 연결(브라우저-Firestore
+    // 간 오래 유지되는 연결)을 새로 맺어야 했고, 일부 네트워크(사내망/프록시/보안 프로그램
+    // 등)에서 이 연결이 계속 503으로 끊기고 재연결을 반복하면서 — 심하면 수십 초가 지나도
+    // 응답을 못 받는 것을 실제로 재현 확인했습니다. 그 결과가 바로 관리자 메뉴 미노출,
+    // 프로젝트 생성 무반응, 최초 로그인 비밀번호 변경 리다이렉트 실패였습니다.
+    // 실시간으로 계속 갱신될 필요는 없는 값이므로(다른 관리자가 내 권한을 바꾸면 재로그인/
+    // 새로고침 시 반영되는 정도면 충분), Admin SDK 기반 서버 API로 1회 조회하는 방식으로
+    // 바꿔 이 연결 자체에 더 이상 의존하지 않도록 했습니다 — 일반 HTTPS 요청 1건이라
+    // 훨씬 빠르고, 위 네트워크 문제의 영향을 받지 않습니다.
+    async function loadProfile() {
       try {
-        const snap = await getDoc(doc(db, "users", firebaseUser.uid));
-        if (!settled) {
-          setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-          setLoading(false);
+        const token = await firebaseUser!.getIdToken();
+        const res = await fetch("/api/auth/profile", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setProfile(data.profile ?? null);
+        } else {
+          console.error("[AuthContext] 사용자 프로필 조회 실패: HTTP", res.status);
+          setProfile(null);
         }
       } catch (error) {
-        console.error("[AuthContext] 사용자 프로필 폴백 조회 실패:", error);
-        if (!settled) setLoading(false);
+        if (!cancelled) {
+          console.error("[AuthContext] 사용자 프로필 조회 실패:", error);
+          setProfile(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    }, 5000);
+    }
+    setLoading(true);
+    loadProfile();
     return () => {
-      unsubProfile();
-      clearTimeout(fallbackTimer);
+      cancelled = true;
     };
   }, [firebaseUser]);
 
