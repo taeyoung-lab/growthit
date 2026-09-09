@@ -3,7 +3,9 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
+import { doc, getDoc } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase/client";
+import type { UserProfile } from "@/lib/types";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -17,8 +19,18 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      await signInWithEmailAndPassword(auth, email, password);
-      router.push("/");
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      // AuthContext의 onSnapshot 구독이 새 페이지에서 다시 붙는 타이밍에 의존하지 않도록,
+      // 로그인 직후 이 화면에서 프로필을 직접 한 번 조회해 이동 경로를 확정합니다.
+      // (5장: must_change_password === true면 반드시 비밀번호 변경 화면으로 이동해야 함)
+      let mustChangePassword = false;
+      try {
+        const snap = await getDoc(doc(db, "users", cred.user.uid));
+        mustChangePassword = snap.exists() ? Boolean((snap.data() as UserProfile).must_change_password) : false;
+      } catch (profileError) {
+        console.error("[LoginPage] 로그인 직후 프로필 조회 실패:", profileError);
+      }
+      router.push(mustChangePassword ? "/change-password" : "/");
     } catch {
       setError("이메일 또는 비밀번호가 올바르지 않습니다.");
     } finally {
@@ -29,7 +41,7 @@ export default function LoginPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-navy px-4">
       <div className="w-full max-w-sm card p-8">
-        <h1 className="mb-1 text-xl font-bold text-navy">회의 지식관리 시스템</h1>
+        <h1 className="mb-1 text-xl font-bold text-navy">그로스잇 회의록시스템</h1>
         <p className="mb-6 text-sm text-gray-500">관리자가 발급한 계정으로 로그인하세요.</p>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
