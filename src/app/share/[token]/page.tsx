@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { signInWithCustomToken } from "firebase/auth";
-import { auth } from "@/lib/firebase/client";
 
 // 21~26장: 외부 공유 접속 화면. 로그인 없이 (1) URL 토큰 (2) 등록 이메일 (3) 임시 비밀번호를 검증합니다.
+//
+// 검증에 성공해도 Firebase 계정으로 로그인시키지 않습니다 — 대신 이 공유 건에만 통하는
+// proof를 세션스토리지에 저장하고, 딱 그 회의록 한 페이지(/share/[token]/view)만 보여줍니다.
+// 그래서 링크를 받은 사람은 앱의 다른 페이지로 이동할 방법이 아예 없습니다.
 export default function ShareAccessPage({ params }: { params: { token: string } }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,8 +28,11 @@ export default function ShareAccessPage({ params }: { params: { token: string } 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "인증에 실패했습니다.");
 
-      await signInWithCustomToken(auth, data.custom_token);
-      router.push(`/meetings/${data.meeting_id}`);
+      sessionStorage.setItem(
+        `share:${params.token}`,
+        JSON.stringify({ proof: data.proof, meeting_id: data.meeting_id, permission: data.permission })
+      );
+      router.push(`/share/${params.token}/view`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "인증에 실패했습니다.");
     } finally {
