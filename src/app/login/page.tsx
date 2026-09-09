@@ -3,8 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase/client";
+import { auth } from "@/lib/firebase/client";
 import type { UserProfile } from "@/lib/types";
 
 export default function LoginPage() {
@@ -20,27 +19,32 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const cred = await signInWithEmailAndPassword(auth, email, password);
-      // AuthContext의 onSnapshot 구독이 새 페이지에서 다시 붙는 타이밍에 의존하지 않도록,
       // 로그인 직후 이 화면에서 프로필을 직접 한 번 조회해 이동 경로를 확정합니다.
       // (5장: must_change_password === true면 반드시 비밀번호 변경 화면으로 이동해야 함)
       //
-      // 2026-09-09 재점검: 로그인 직후에는 Firestore 연결이 아직 완전히 자리잡기 전이라
-      // "client is offline" 오류로 이 조회 자체가 실패하는 경우가 실제로 재현되었고, 그 결과
-      // must_change_password 계정도 비밀번호 변경 화면으로 못 넘어가는 회귀가 있었습니다.
-      // 한 번 실패해도 곧바로 포기하지 않고 짧은 간격을 두고 최대 3회까지 다시 시도합니다.
+      // 2026-09-09 재점검: 예전에는 클라이언트 Firestore SDK(getDoc)로 직접 조회했는데,
+      // 로그인 직후에는 Firestore의 실시간 연결이 아직 자리잡기 전이라 "client is offline"
+      // 오류로 이 조회 자체가 실패하는 경우가 실제로 재현되었고, 그 결과 must_change_password
+      // 계정도 비밀번호 변경 화면으로 못 넘어가는 회귀가 있었습니다. Admin SDK 기반 서버
+      // API(/api/auth/profile)는 클라이언트 네트워크 상태와 무관한 일반 HTTPS 요청이라 이
+      // 문제 자체가 발생하지 않습니다. 그래도 일시적 네트워크 오류에 대비해 1회만 재시도합니다.
       let mustChangePassword = false;
-      let profileLoaded = false;
-      for (let attempt = 1; attempt <= 3 && !profileLoaded; attempt++) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          const snap = await getDoc(doc(db, "users", cred.user.uid));
-          mustChangePassword = snap.exists() ? Boolean((snap.data() as UserProfile).must_change_password) : false;
-          profileLoaded = true;
-        } catch (profileError) {
-          console.error(`[LoginPage] 로그인 직후 프로필 조회 실패(시도 ${attempt}/3):`, profileError);
-          if (attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, attempt * 800));
+          const token = await cred.user.getIdToken();
+          const res = await fetch("/api/auth/profile", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            mustChangePassword = Boolean((data.profile as UserProfile | null)?.must_change_password);
+            break;
           }
+          console.error(`[LoginPage] 로그인 직후 프로필 조회 실패(시도 ${attempt}/2): HTTP`, res.status);
+        } catch (profileError) {
+          console.error(`[LoginPage] 로그인 직후 프로필 조회 실패(시도 ${attempt}/2):`, profileError);
         }
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500));
       }
       router.push(mustChangePassword ? "/change-password" : "/");
     } catch {
