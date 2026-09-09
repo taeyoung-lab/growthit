@@ -76,6 +76,14 @@
       ]
     },
     {
+      "collectionGroup": "projects",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "organization_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "shares",
       "queryScope": "COLLECTION_GROUP",
       "fields": [{ "fieldPath": "share_token", "order": "ASCENDING" }]
