@@ -27,8 +27,15 @@ export const auth: Auth = firebaseApp ? getAuth(firebaseApp) : ({} as Auth);
 // 계속 503으로 끊기고 재연결을 반복하면서 onSnapshot이 영영 데이터를 못 받는 경우가 있습니다.
 // (관리자 메뉴가 안 보이거나 최초 로그인 후 비밀번호 변경 화면으로 안 넘어가던 문제가 실제로
 // 이 증상이었음을 크롬에서 재현 확인함 — Listen 채널이 POST 200 → GET 503 → terminate를
-// 무한 반복.) experimentalAutoDetectLongPolling으로 초기화하면 SDK가 이런 환경을 자동 감지해서
-// 롱폴링 방식으로 자동 전환하므로, 이 재연결 반복 문제를 피할 수 있습니다.
+// 무한 반복.)
+//
+// 2026-09-09 재점검: experimentalAutoDetectLongPolling은 "먼저 스트리밍 연결을 시도해보고
+// 실패하면 롱폴링으로 전환"하는 방식이라, 이 환경에서는 전환되기까지 실제로 10~20회 이상의
+// 503 재연결이 반복되는 것을 다시 확인했습니다. 이 반복 구간 동안 등록된 일부 onSnapshot
+// 구독(특히 로그인 직후 붙는 사용자 프로필 구독)이 응답을 영영 받지 못하는 상태로 남는
+// 현상까지 재현되어(관리자 메뉴 미노출·프로젝트 생성 무반응의 실제 원인), 감지 방식 대신
+// 처음부터 무조건 롱폴링만 쓰도록 강제합니다(experimentalForceLongPolling). 스트리밍 시도 자체를
+// 건너뛰므로 503 재연결 구간이 아예 발생하지 않습니다.
 export const db: Firestore = firebaseApp
-  ? initializeFirestore(firebaseApp, { experimentalAutoDetectLongPolling: true })
+  ? initializeFirestore(firebaseApp, { experimentalForceLongPolling: true })
   : ({} as Firestore);
