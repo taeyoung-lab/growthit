@@ -36,10 +36,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!firebaseUser) return;
-    const unsubProfile = onSnapshot(doc(db, "users", firebaseUser.uid), (snap) => {
-      setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-      setLoading(false);
-    });
+    const unsubProfile = onSnapshot(
+      doc(db, "users", firebaseUser.uid),
+      (snap) => {
+        setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
+        setLoading(false);
+      },
+      (error) => {
+        // 프로필 조회 실패(권한/네트워크 등) 시에도 무한 로딩에 빠지지 않도록 처리합니다.
+        console.error("[AuthContext] 사용자 프로필 조회 실패:", error);
+        setProfile(null);
+        setLoading(false);
+      }
+    );
     return () => unsubProfile();
   }, [firebaseUser]);
 
