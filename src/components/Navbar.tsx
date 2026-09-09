@@ -10,7 +10,8 @@ const LINKS = [
   { href: "/", label: "메인" },
   { href: "/projects", label: "프로젝트" },
   { href: "/me", label: "내 업무" },
-  { href: "/admin", label: "관리자" },
+  { href: "/qna", label: "Q&A 관리", adminOnly: true },
+  { href: "/admin", label: "관리자", superAdminOnly: true },
 ];
 
 export function Navbar() {
@@ -21,9 +22,13 @@ export function Navbar() {
     <header className="border-b border-gray-200 bg-white">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
         <div className="flex items-center gap-8">
-          <span className="font-bold text-navy">회의 지식관리</span>
+          <span className="font-bold text-navy">그로스잇 회의록시스템</span>
           <nav className="flex gap-1">
-            {LINKS.filter((l) => l.href !== "/admin" || profile?.org_role === "SUPER_ADMIN").map((l) => (
+            {LINKS.filter((l) => {
+              if (l.superAdminOnly) return profile?.org_role === "SUPER_ADMIN";
+              if (l.adminOnly) return profile?.org_role === "SUPER_ADMIN" || profile?.org_role === "ADMIN";
+              return true;
+            }).map((l) => (
               <Link
                 key={l.href}
                 href={l.href}

@@ -7,7 +7,7 @@ import { useAuth } from "@/contexts/AuthContext";
 /**
  * 로그인하지 않은 사용자를 /login으로 보냅니다. 보호가 필요한 페이지에서 감싸 사용하세요.
  * 또한 최초 로그인 시(must_change_password === true) /change-password로 강제 이동시킵니다
- * (5장: 초기 비밀번호 1234 → 최초 접속 시 비밀번호 재설정 필수).
+ * (5장: 초기 비밀번호 123456 → 최초 접속 시 비밀번호 재설정 필수).
  */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { firebaseUser, profile, loading } = useAuth();
