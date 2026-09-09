@@ -4,7 +4,10 @@ import { requireSuperAdmin, ApiAuthError } from "@/lib/adminAuthCheck";
 import type { OrgRole } from "@/lib/types";
 
 const VALID_ROLES: OrgRole[] = ["SUPER_ADMIN", "ADMIN", "USER"];
-const INITIAL_PASSWORD = "1234"; // 5장: 초기 비밀번호는 고정값 1234, 최초 로그인 시 변경 필수
+// 5장: 초기 비밀번호는 고정값, 최초 로그인 시 변경 필수.
+// 주의: Firebase Auth는 비밀번호 최소 6자를 요구하므로 "1234"(4자)로는 계정 생성/리셋이
+// 항상 실패했습니다(관리자 화면에서 인원 생성·비밀번호 리셋이 안 되던 버그의 원인).
+const INITIAL_PASSWORD = "123456";
 
 // 5장 회원관리: 사용자 생성은 슈퍼 관리자가 이메일로 계정을 발급하는 방식입니다(자체 가입 없음).
 // Firebase Auth 계정 생성 + Firestore users/{uid} 프로필 생성을 함께 수행합니다.
