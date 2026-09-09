@@ -1,4 +1,3 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
 
@@ -19,6 +18,11 @@ export async function GET(req: NextRequest) {
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
     console.error("[api/auth/profile] 조회 실패:", e);
-    return NextResponse.json({ error: "프로필 조회에 실패했습니다." }, { status: 500 });
+    // 임시 진단용: 원인을 특정하기 위해 에러 메시지를 잠시 함께 내려줍니다(비밀번호/키 등
+    // 민감정보는 포함되지 않음). 원인 파악 후 다음 커밋에서 다시 제거할 예정입니다.
+    return NextResponse.json(
+      { error: "프로필 조회에 실패했습니다.", detail: e instanceof Error ? e.message : String(e) },
+      { status: 500 }
+    );
   }
 }
