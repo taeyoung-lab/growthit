@@ -1,4 +1,5 @@
 rules_version = '2';
+service cloud.firestore {
 
 // ============================================================================
 // Firestore 보안 규칙
@@ -76,30 +77,42 @@ function isMeetingAuthor(meetingId) {
 
 match /databases/{database}/documents {
 
-  // ---- 조직 / 부서 : 서버(관리자 API)에서만 생성·수정. 같은 회사 구성원은 조회만 가능 ----
+  // ---- 조직 / 부서 : 서버(관리자 API)에서만 생성·수정. ----
+  // 2026-09-11: organizations는 sameOrg(orgId)로 게이팅했었으나, myProfile()/myOrgId()/sameOrg()처럼
+  // 커스텀 함수를 여러 단계 거쳐 get()을 호출하면 list(쿼리) 규칙 평가에서 "Missing or insufficient
+  // permissions"로 실패하는 문제를 확인함(단일 문서 get에는 영향 없음 — 회의 관련 규칙들이 멀쩡했던 이유).
+  // organizations는 회사명/코드 정도만 담고 있어 민감정보가 없고, 외부 공유 회의에 다른 회사 참석자
+  // 표시를 위해 어차피 전체 조직 목록 조회가 필요했으므로(useDirectory.ts) 로그인 사용자 전체 공개로 전환.
   match /organizations/{orgId} {
-    allow read: if sameOrg(orgId);
+    allow read: if isSignedIn();
     allow write: if false; // Admin SDK 경유 (API route)만 허용
   }
 
+  // departments/users/projects는 같은 이유로 sameOrg() 대신 get()을 인라인으로 직접 호출해 비교합니다.
   match /departments/{deptId} {
-    allow read: if isSignedIn() && sameOrg(resource.data.organization_id);
+    allow read: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id;
     allow write: if false;
   }
 
   // ---- 사용자 프로필: 같은 회사 구성원 조회 가능. 생성/수정/삭제(soft-delete)는 서버 전용 ----
   // (로그인 계정 생성과 프로필 생성이 함께 이루어져야 하므로 /api/admin/users 라우트에서 처리)
   match /users/{uid} {
-    allow read: if isSignedIn() && (request.auth.uid == uid || sameOrg(resource.data.organization_id));
+    allow read: if isSignedIn() &&
+      (request.auth.uid == uid ||
+       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id);
     allow write: if false;
   }
 
   // ---- 프로젝트 ----
   match /projects/{projectId} {
-    allow read: if isSignedIn() && sameOrg(resource.data.organization_id);
-    allow create: if isSignedIn() && sameOrg(request.resource.data.organization_id);
+    allow read: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id;
+    allow create: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == request.resource.data.organization_id;
     allow update, delete: if isSignedIn() &&
-      (isSuperAdmin() || sameOrg(resource.data.organization_id));
+      (isSuperAdmin() ||
+       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id);
   }
 
   // ---- 회의 ----
@@ -190,4 +203,5 @@ match /databases/{database}/documents {
   match /meetingShareAccessLogs/{logId} {
     allow read, write: if false;
   }
+}
 }
