@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { addDoc, collection, getDocs, query, where } from "firebase/firestore";
+import { addDoc, collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
 import { db } from "@/lib/firebase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthGate } from "@/components/AuthGate";
@@ -17,6 +17,9 @@ function ProjectsContent() {
   const [creating, setCreating] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   async function load() {
     if (!profile) return;
@@ -65,6 +68,26 @@ function ProjectsContent() {
     }
   }
 
+  // 삭제 = 보관(archive): 프로젝트에는 이미 회의가 연결되어 있을 수 있으므로 문서를 실제로
+  // 지우지 않고 project_status만 ARCHIVED로 바꿉니다(회사/부서/사용자 삭제와 동일한 원칙).
+  // 언제든 "복원"으로 다시 활성화할 수 있습니다.
+  async function setArchived(p: Project, archived: boolean) {
+    try {
+      await updateDoc(doc(db, "projects", p.id), {
+        project_status: archived ? "ARCHIVED" : "ACTIVE",
+        updated_at: Date.now(),
+      });
+      setConfirmArchiveId(null);
+      await load();
+    } catch (error) {
+      console.error("[ProjectsPage] 프로젝트 상태 변경 실패:", error);
+      alert("처리에 실패했습니다. 잠시 후 다시 시도해주세요.");
+    }
+  }
+
+  const activeProjects = projects.filter((p) => p.project_status !== "ARCHIVED");
+  const archivedProjects = projects.filter((p) => p.project_status === "ARCHIVED");
+
   return (
     <div className="min-h-screen">
       <Navbar />
@@ -85,15 +108,116 @@ function ProjectsContent() {
         {loadError && <p className="card mb-4 p-4 text-sm text-red-600">{loadError}</p>}
 
         <div className="flex flex-col gap-2">
-          {projects.map((p) => (
-            <Link key={p.id} href={`/meetings/new?project=${p.id}`} className="card block p-4 hover:border-mint">
-              <div className="font-medium text-ink">{p.project_name}</div>
-              <div className="text-sm text-gray-400">{p.project_description || "설명 없음"}</div>
-            </Link>
+          {activeProjects.map((p) => (
+            <div key={p.id} className="card flex items-center justify-between gap-3 p-4">
+              <Link href={`/meetings/new?project=${p.id}`} className="min-w-0 flex-1 hover:opacity-80">
+                <div className="font-medium text-ink">{p.project_name}</div>
+                <div className="truncate text-sm text-gray-400">{p.project_description || "설명 없음"}</div>
+              </Link>
+              <div className="flex shrink-0 gap-2">
+                <button className="btn btn-secondary text-xs" onClick={() => setEditingProject(p)}>수정</button>
+                {confirmArchiveId === p.id ? (
+                  <span className="flex items-center gap-1 text-xs">
+                    보관할까요?
+                    <button className="btn btn-accent text-xs" onClick={() => setArchived(p, true)}>예</button>
+                    <button className="btn btn-secondary text-xs" onClick={() => setConfirmArchiveId(null)}>아니오</button>
+                  </span>
+                ) : (
+                  <button className="btn btn-secondary text-xs" onClick={() => setConfirmArchiveId(p.id)}>삭제</button>
+                )}
+              </div>
+            </div>
           ))}
-          {!loadError && projects.length === 0 && <p className="card p-6 text-center text-sm text-gray-400">아직 프로젝트가 없습니다.</p>}
+          {!loadError && activeProjects.length === 0 && <p className="card p-6 text-center text-sm text-gray-400">아직 프로젝트가 없습니다.</p>}
         </div>
+
+        {archivedProjects.length > 0 && (
+          <div className="mt-6">
+            <button className="text-xs text-gray-400 underline" onClick={() => setShowArchived((v) => !v)}>
+              보관된 프로젝트 {archivedProjects.length}개 {showArchived ? "숨기기" : "보기"}
+            </button>
+            {showArchived && (
+              <div className="mt-2 flex flex-col gap-2">
+                {archivedProjects.map((p) => (
+                  <div key={p.id} className="card flex items-center justify-between gap-3 p-4 opacity-60">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-ink">{p.project_name}</div>
+                      <div className="truncate text-sm text-gray-400">{p.project_description || "설명 없음"}</div>
+                    </div>
+                    <button className="btn btn-secondary shrink-0 text-xs" onClick={() => setArchived(p, false)}>복원</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {editingProject && (
+          <ProjectModal
+            project={editingProject}
+            onClose={() => setEditingProject(null)}
+            onDone={async () => { setEditingProject(null); await load(); }}
+          />
+        )}
       </main>
+    </div>
+  );
+}
+
+function ProjectModal({
+  project,
+  onClose,
+  onDone,
+}: {
+  project: Project;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [name, setName] = useState(project.project_name);
+  const [desc, setDesc] = useState(project.project_description);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await updateDoc(doc(db, "projects", project.id), {
+        project_name: name.trim(),
+        project_description: desc.trim(),
+        updated_at: Date.now(),
+      });
+      onDone();
+    } catch (e) {
+      console.error("[ProjectModal] 프로젝트 수정 실패:", e);
+      setError("수정에 실패했습니다. 잠시 후 다시 시도해주세요.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div className="card w-full max-w-sm p-6">
+        <h3 className="mb-4 font-semibold text-ink">프로젝트 수정</h3>
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">프로젝트명</label>
+            <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">설명</label>
+            <input className="input w-full" value={desc} onChange={(e) => setDesc(e.target.value)} />
+          </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="mt-2 flex justify-end gap-2">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>취소</button>
+            <button type="submit" className="btn btn-primary" disabled={submitting || !name.trim()}>저장</button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
