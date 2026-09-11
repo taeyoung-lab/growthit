@@ -77,13 +77,16 @@ function AdminContent() {
         {message && <div className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
 
         {tab === "organizations" && (
-          <OrgTab orgs={orgs} onCreated={(name) => { setMessage(`"${name}" 회사가 생성되었습니다.`); loadAll(); }} />
+          <OrgTab
+            orgs={orgs}
+            onCreated={(name) => { if (name) setMessage(`"${name}" 회사가 생성되었습니다.`); loadAll(); }}
+          />
         )}
         {tab === "departments" && (
           <DeptTab
             depts={depts}
             organizationId={profile!.organization_id}
-            onCreated={(name) => { setMessage(`"${name}" 부서가 생성되었습니다.`); loadAll(); }}
+            onCreated={(name) => { if (name) setMessage(`"${name}" 부서가 생성되었습니다.`); loadAll(); }}
           />
         )}
         {tab === "users" && (
@@ -161,6 +164,8 @@ function OrgTab({ orgs, onCreated }: { orgs: Organization[]; onCreated: (name: s
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -180,6 +185,16 @@ function OrgTab({ orgs, onCreated }: { orgs: Organization[]; onCreated: (name: s
     }
   }
 
+  async function handleDeactivate(id: string) {
+    try {
+      await authedFetch(`/api/admin/organizations?id=${id}`, { method: "DELETE" });
+      onCreated(""); // 목록만 새로고침 (메시지는 아래에서 별도 처리하지 않고 조용히 갱신)
+      setConfirmDeleteId(null);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "비활성화 실패");
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <form onSubmit={submit} className="card flex gap-2 p-4">
@@ -189,8 +204,79 @@ function OrgTab({ orgs, onCreated }: { orgs: Organization[]; onCreated: (name: s
       </form>
       <div className="flex flex-col gap-2">
         {orgs.map((o) => (
-          <div key={o.id} className="card p-3 text-sm">{o.organization_name} <span className="text-gray-400">({o.organization_code})</span></div>
+          <div key={o.id} className={`card flex items-center justify-between p-3 text-sm ${o.organization_status === "INACTIVE" ? "opacity-50" : ""}`}>
+            <div>
+              {o.organization_name} <span className="text-gray-400">({o.organization_code})</span>
+              {o.organization_status === "INACTIVE" && <span className="badge b-overdue ml-2">비활성</span>}
+            </div>
+            {o.organization_status === "ACTIVE" && (
+              <div className="flex gap-2">
+                <button className="btn btn-secondary text-xs" onClick={() => setEditingOrg(o)}>수정</button>
+                {confirmDeleteId === o.id ? (
+                  <span className="flex items-center gap-1 text-xs">
+                    정말 비활성화할까요?
+                    <button className="btn btn-accent text-xs" onClick={() => handleDeactivate(o.id)}>예</button>
+                    <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(null)}>아니오</button>
+                  </span>
+                ) : (
+                  <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(o.id)}>삭제</button>
+                )}
+              </div>
+            )}
+          </div>
         ))}
+      </div>
+
+      {editingOrg && (
+        <OrgModal
+          org={editingOrg}
+          onClose={() => setEditingOrg(null)}
+          onDone={() => { setEditingOrg(null); onCreated(""); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function OrgModal({ org, onClose, onDone }: { org: Organization; onClose: () => void; onDone: () => void }) {
+  const [name, setName] = useState(org.organization_name);
+  const [code, setCode] = useState(org.organization_code);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await authedFetch("/api/admin/organizations", {
+        method: "PATCH",
+        body: JSON.stringify({ id: org.id, organization_name: name, organization_code: code }),
+      });
+      onDone();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "수정 실패");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div className="card w-full max-w-sm p-6">
+        <h3 className="mb-4 font-semibold text-ink">회사 정보 수정</h3>
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">회사명</label>
+            <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">회사코드</label>
+            <input className="input w-full" value={code} onChange={(e) => setCode(e.target.value)} required />
+          </div>
+          <div className="mt-2 flex justify-end gap-2">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>취소</button>
+            <button type="submit" className="btn btn-primary" disabled={submitting}>저장</button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -209,6 +295,10 @@ function DeptTab({
   const [code, setCode] = useState("");
   const [parent, setParent] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [editingDept, setEditingDept] = useState<Department | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const deptName = (id: string | null) => depts.find((d) => d.id === id)?.department_name || null;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -233,6 +323,16 @@ function DeptTab({
     }
   }
 
+  async function handleDeactivate(id: string) {
+    try {
+      await authedFetch(`/api/admin/departments?id=${id}`, { method: "DELETE" });
+      onCreated("");
+      setConfirmDeleteId(null);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "비활성화 실패");
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <form onSubmit={submit} className="card flex flex-wrap gap-2 p-4">
@@ -240,7 +340,7 @@ function DeptTab({
         <input className="input" placeholder="부서코드" value={code} onChange={(e) => setCode(e.target.value)} required />
         <select className="input" value={parent} onChange={(e) => setParent(e.target.value)}>
           <option value="">상위 부서 없음</option>
-          {depts.map((d) => (
+          {depts.filter((d) => d.department_status === "ACTIVE").map((d) => (
             <option key={d.id} value={d.id}>{d.department_name}</option>
           ))}
         </select>
@@ -248,8 +348,109 @@ function DeptTab({
       </form>
       <div className="flex flex-col gap-2">
         {depts.map((d) => (
-          <div key={d.id} className="card p-3 text-sm">{d.department_name} <span className="text-gray-400">({d.department_code})</span></div>
+          <div key={d.id} className={`card flex items-center justify-between p-3 text-sm ${d.department_status === "INACTIVE" ? "opacity-50" : ""}`}>
+            <div>
+              {d.department_name} <span className="text-gray-400">({d.department_code})</span>
+              {deptName(d.parent_department_id) && (
+                <span className="text-gray-400"> · 상위: {deptName(d.parent_department_id)}</span>
+              )}
+              {d.department_status === "INACTIVE" && <span className="badge b-overdue ml-2">비활성</span>}
+            </div>
+            {d.department_status === "ACTIVE" && (
+              <div className="flex gap-2">
+                <button className="btn btn-secondary text-xs" onClick={() => setEditingDept(d)}>수정</button>
+                {confirmDeleteId === d.id ? (
+                  <span className="flex items-center gap-1 text-xs">
+                    정말 비활성화할까요?
+                    <button className="btn btn-accent text-xs" onClick={() => handleDeactivate(d.id)}>예</button>
+                    <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(null)}>아니오</button>
+                  </span>
+                ) : (
+                  <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(d.id)}>삭제</button>
+                )}
+              </div>
+            )}
+          </div>
         ))}
+        {depts.length === 0 && <p className="card p-6 text-center text-sm text-gray-400">등록된 부서가 없습니다.</p>}
+      </div>
+
+      {editingDept && (
+        <DeptModal
+          dept={editingDept}
+          depts={depts}
+          onClose={() => setEditingDept(null)}
+          onDone={() => { setEditingDept(null); onCreated(""); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeptModal({
+  dept,
+  depts,
+  onClose,
+  onDone,
+}: {
+  dept: Department;
+  depts: Department[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [name, setName] = useState(dept.department_name);
+  const [code, setCode] = useState(dept.department_code);
+  const [parent, setParent] = useState(dept.parent_department_id || "");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await authedFetch("/api/admin/departments", {
+        method: "PATCH",
+        body: JSON.stringify({
+          id: dept.id,
+          department_name: name,
+          department_code: code,
+          parent_department_id: parent || null,
+        }),
+      });
+      onDone();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "수정 실패");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div className="card w-full max-w-sm p-6">
+        <h3 className="mb-4 font-semibold text-ink">부서 정보 수정</h3>
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">부서명</label>
+            <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">부서코드</label>
+            <input className="input w-full" value={code} onChange={(e) => setCode(e.target.value)} required />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">상위 부서</label>
+            <select className="input w-full" value={parent} onChange={(e) => setParent(e.target.value)}>
+              <option value="">상위 부서 없음</option>
+              {depts.filter((d) => d.department_status === "ACTIVE" && d.id !== dept.id).map((d) => (
+                <option key={d.id} value={d.id}>{d.department_name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="mt-2 flex justify-end gap-2">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>취소</button>
+            <button type="submit" className="btn btn-primary" disabled={submitting}>저장</button>
+          </div>
+        </form>
       </div>
     </div>
   );
