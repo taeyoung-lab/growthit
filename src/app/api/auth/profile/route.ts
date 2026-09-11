@@ -11,9 +11,6 @@ import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
 // 그래서 로그인 직후/앱 진입 시 프로필 조회는 클라이언트 Firestore 실시간 연결에 기대지
 // 않고, 이 서버 API(Admin SDK — 클라이언트 네트워크 상태와 무관하게 항상 빠르고 안정적인
 // 일반 HTTPS 요청 1건)를 통해 가져옵니다.
-//
-// 2026-09-10: growthit-meetings 프로젝트 이전 후 500 에러 재현 — 원인 진단을 위해
-// detail 필드를 임시로 추가함(민감정보 노출 없음, 원인 확인 후 제거 예정).
 export async function GET(req: NextRequest) {
   try {
     const { profile } = await requireUser(req);
@@ -21,9 +18,6 @@ export async function GET(req: NextRequest) {
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
     console.error("[api/auth/profile] 조회 실패:", e);
-    return NextResponse.json(
-      { error: "프로필 조회에 실패했습니다.", detail: e instanceof Error ? e.message : String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "프로필 조회에 실패했습니다." }, { status: 500 });
   }
 }
