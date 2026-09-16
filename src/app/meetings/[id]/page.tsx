@@ -162,6 +162,8 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
       decision_content: newDecisionContent.trim(),
       decision_status: "ACTIVE",
       version: 1,
+      // 회의의 현재 member_uids를 그대로 복사 (LIST 쿼리 보안 규칙 제약 우회용 — firestore.rules 참고)
+      member_uids: meeting.member_uids,
       created_at: now,
       updated_at: now,
     } satisfies Decision);
@@ -228,6 +230,8 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
       question_content: newQuestion.trim(),
       question_status: "ANSWER_PENDING",
       due_date: null,
+      // 회의의 현재 member_uids를 그대로 복사 (LIST 쿼리 보안 규칙 제약 우회용 — firestore.rules 참고)
+      member_uids: meeting.member_uids,
       created_at: now,
       updated_at: now,
     });
@@ -373,17 +377,17 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
           <h2 className="mb-3 font-semibold text-ink">4. 향후추진과제</h2>
           <div className="flex flex-col gap-2">
             {actionItems.map((a) => (
-              <div key={a.id} className="flex items-center justify-between rounded-lg border border-gray-200 p-3 text-sm">
-                <div>
+              <div key={a.id} className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 p-3 text-sm">
+                <div className="min-w-0 flex-1">
                   <p className="font-medium text-ink">{a.title}</p>
-                  <p className="text-xs text-gray-400">
+                  <p className="mt-1 text-xs text-gray-400">
                     담당 {a.assignee_user_ids.map((id) => dir.displayName(id)).join(", ") || "미지정"} · 기한 {a.due_date || "없음"}
                     {a.description && ` · ${a.description}`}
                   </p>
                 </div>
                 {canEdit ? (
                   <select
-                    className="input w-28 text-xs"
+                    className="input w-28 flex-shrink-0 text-xs"
                     value={a.status}
                     onChange={(e) => updateActionStatus(a, e.target.value as ActionItemStatus)}
                   >
@@ -392,7 +396,7 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
                     ))}
                   </select>
                 ) : (
-                  <span className="badge badge-progress">{ACTION_ITEM_STATUS_LABEL[a.status]}</span>
+                  <span className="badge badge-progress flex-shrink-0">{ACTION_ITEM_STATUS_LABEL[a.status]}</span>
                 )}
               </div>
             ))}
