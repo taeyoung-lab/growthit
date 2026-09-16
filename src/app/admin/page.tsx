@@ -214,7 +214,7 @@ function OrgTab({ orgs, onCreated }: { orgs: Organization[]; onCreated: (name: s
                 <button className="btn btn-secondary text-xs" onClick={() => setEditingOrg(o)}>수정</button>
                 {confirmDeleteId === o.id ? (
                   <span className="flex items-center gap-1 text-xs">
-                    정말 비활성화할까요?
+                    정말 삭제할까요?
                     <button className="btn btn-accent text-xs" onClick={() => handleDeactivate(o.id)}>예</button>
                     <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(null)}>아니오</button>
                   </span>
@@ -361,7 +361,7 @@ function DeptTab({
                 <button className="btn btn-secondary text-xs" onClick={() => setEditingDept(d)}>수정</button>
                 {confirmDeleteId === d.id ? (
                   <span className="flex items-center gap-1 text-xs">
-                    정말 비활성화할까요?
+                    정말 삭제할까요?
                     <button className="btn btn-accent text-xs" onClick={() => handleDeactivate(d.id)}>예</button>
                     <button className="btn btn-secondary text-xs" onClick={() => setConfirmDeleteId(null)}>아니오</button>
                   </span>
@@ -476,6 +476,7 @@ function UsersTab({
   const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
 
   const deptName = (id: string | null) => depts.find((d) => d.id === id)?.department_name || "-";
+  const [syncing, setSyncing] = useState(false);
 
   async function handleDelete(uid: string) {
     try {
@@ -488,9 +489,28 @@ function UsersTab({
     }
   }
 
+  // 2026-09-16: 기존 계정들은 로그인 토큰에 org_role/organization_id 클레임이 없어서
+  // (새로 만들거나 권한을 바꿀 때만 채워짐) 회의/질의/향후추진과제 목록 조회 규칙이 admin
+  // 여부를 확인하지 못할 수 있습니다. 한 번만 눌러서 기존 계정 전체의 클레임을 채워주세요 —
+  // 이후 각 사용자는 다음 로그인(또는 새로고침)부터 정상 반영됩니다.
+  async function syncClaims() {
+    setSyncing(true);
+    try {
+      const res = (await authedFetch("/api/admin/sync-claims", { method: "POST" })) as { synced: number };
+      setMessage(`${res.synced}명의 계정 권한 정보를 로그인 토큰에 동기화했습니다. 각자 새로고침하면 반영됩니다.`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "권한 동기화 실패");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        <button className="btn btn-secondary" onClick={syncClaims} disabled={syncing}>
+          {syncing ? "동기화 중…" : "권한 동기화"}
+        </button>
         <button className="btn btn-primary" onClick={() => setShowCreate(true)}>+ 인원 생성</button>
       </div>
 
