@@ -70,6 +70,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 훨씬 빠르고, 위 네트워크 문제의 영향을 받지 않습니다.
     async function loadProfile() {
       try {
+        // 2026-09-16: 로그인 토큰의 org_role/organization_id 커스텀 클레임(Firestore LIST 쿼리
+        // 보안 규칙이 admin 여부를 판단하는 데 사용 — firestore.rules, userClaims.ts 참고)은
+        // 서버에서 클레임을 바꿔도 클라이언트가 이미 들고 있는 토큰에는 즉시 반영되지 않습니다.
+        // 세션당 한 번, 토큰을 강제로 새로고침해서 최신 클레임을 확실히 받아옵니다.
+        await firebaseUser!.getIdToken(true);
         const token = await firebaseUser!.getIdToken();
         const res = await fetch("/api/auth/profile", {
           headers: { Authorization: `Bearer ${token}` },
