@@ -186,6 +186,8 @@ export interface Question {
   question_content: string;
   question_status: QuestionStatus;
   due_date: string | null; // YYYY-MM-DD
+  // 생성 시점 회의의 member_uids 스냅샷 (LIST 쿼리 보안 규칙 제약 우회용 — Meeting.member_uids 주석 참고)
+  member_uids: ID[];
   created_at: number;
   updated_at: number;
 }
@@ -221,6 +223,8 @@ export interface ActionItem {
   due_date: string | null; // 추진일정
   created_by_user_id: ID;
   assignee_user_ids: ID[]; // 담당주체 (다대다를 배열로 단순화 - MVP)
+  // 생성 시점 회의의 member_uids 스냅샷 (LIST 쿼리 보안 규칙 제약 우회용 — Meeting.member_uids 주석 참고)
+  member_uids: ID[];
   created_at: number;
   updated_at: number;
 }
@@ -238,6 +242,8 @@ export interface Decision {
   decision_content: string;
   decision_status: DecisionStatus;
   version: number; // 변경될 때마다 +1
+  // 생성 시점 회의의 member_uids 스냅샷 (LIST 쿼리 보안 규칙 제약 우회용 — Meeting.member_uids 주석 참고)
+  member_uids: ID[];
   created_at: number;
   updated_at: number;
 }
@@ -264,6 +270,8 @@ export interface MeetingRelation {
   child_meeting_id: ID;
   relation_type: RelationType;
   created_by: ID;
+  // 생성 시점 child 회의의 member_uids 스냅샷 (LIST 쿼리 보안 규칙 제약 우회용 — Meeting.member_uids 주석 참고)
+  member_uids: ID[];
   created_at: number;
 }
 
