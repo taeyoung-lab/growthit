@@ -9,12 +9,14 @@ interface AuthContextValue {
   firebaseUser: FirebaseUser | null;
   profile: UserProfile | null;
   loading: boolean;
+  refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue>({
   firebaseUser: null,
   profile: null,
   loading: true,
+  refreshProfile: async () => {},
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -32,6 +34,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     return () => unsubAuth();
   }, []);
+
+  // 최초 로그인 시 비밀번호를 재설정한 직후처럼, 서버의 프로필 값(must_change_password 등)이
+  // 방금 바뀐 것을 이 세션에도 즉시 반영해야 할 때 호출합니다. (2026-09-16: 비밀번호 변경 후
+  // router.replace("/")로 이동해도 이 컨텍스트의 profile이 로그인 시점 값(must_change_password:
+  // true)에 머물러 있어서 AuthGate가 곧바로 /change-password로 다시 튕겨내는 문제가 있었음 —
+  // 화면상으로는 "다음 단계로 진행이 안 되는" 것처럼 보이고, 새로고침해야만 서버 값을 다시
+  // 읽어와서 정상 진입되던 원인이었음.)
+  async function refreshProfile() {
+    if (!firebaseUser) return;
+    const token = await firebaseUser.getIdToken();
+    const res = await fetch("/api/auth/profile", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setProfile(data.profile ?? null);
+    }
+  }
 
   useEffect(() => {
     if (!firebaseUser) return;
@@ -79,7 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [firebaseUser]);
 
   return (
-    <AuthContext.Provider value={{ firebaseUser, profile, loading }}>
+    <AuthContext.Provider value={{ firebaseUser, profile, loading, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );
