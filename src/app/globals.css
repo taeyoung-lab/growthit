@@ -13,26 +13,37 @@ body {
   color: #1b2340;
 }
 
-.badge {
-  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
-}
-.badge-pending { @apply bg-amber-100 text-amber-800; }
-.badge-progress { @apply bg-blue-100 text-blue-800; }
-.badge-answered { @apply bg-emerald-100 text-emerald-800; }
-.badge-overdue { @apply bg-red-100 text-red-800; }
-.badge-closed { @apply bg-gray-100 text-gray-600; }
+/* 2026-09-16: 아래 커스텀 클래스들을 반드시 @layer components 안에 둡니다.
+   Tailwind는 @layer base → components → utilities 순서로 최종 CSS를 재배치하므로,
+   이렇게 해야 예를 들어 className="input w-28"처럼 유틸리티 클래스(w-28)를 같이 쓸 때
+   유틸리티가 항상 이 클래스들(.input의 w-full 등)을 이깁니다. @layer 없이 그냥 이 파일에
+   순서대로 적어두면(@tailwind utilities 다음에 위치) 같은 우선순위(specificity)에서
+   "나중에 나온 규칙이 이긴다"는 CSS 규칙 때문에 .input의 width:100%가 w-28의 width:7rem을
+   덮어써버리는 문제가 실제로 발생했습니다(회의 상세 "4. 향후추진과제" 카드에서 select가
+   전체 폭을 차지하며 제목이 세로로 한 글자씩 쪼개져 보이던 버그의 원인).
+*/
+@layer components {
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .badge-pending { @apply bg-amber-100 text-amber-800; }
+  .badge-progress { @apply bg-blue-100 text-blue-800; }
+  .badge-answered { @apply bg-emerald-100 text-emerald-800; }
+  .badge-overdue { @apply bg-red-100 text-red-800; }
+  .badge-closed { @apply bg-gray-100 text-gray-600; }
 
-.card {
-  @apply bg-white border border-gray-200 rounded-xl shadow-sm;
-}
+  .card {
+    @apply bg-white border border-gray-200 rounded-xl shadow-sm;
+  }
 
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
-}
-.btn-primary { @apply bg-navy text-white hover:bg-[#1c2c52]; }
-.btn-secondary { @apply bg-white border border-gray-300 text-ink hover:bg-gray-50; }
-.btn-accent { @apply bg-mint text-white hover:bg-[#26ab9f]; }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary { @apply bg-navy text-white hover:bg-[#1c2c52]; }
+  .btn-secondary { @apply bg-white border border-gray-300 text-ink hover:bg-gray-50; }
+  .btn-accent { @apply bg-mint text-white hover:bg-[#26ab9f]; }
 
-.input {
-  @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mint focus:border-transparent;
+  .input {
+    @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mint focus:border-transparent;
+  }
 }
