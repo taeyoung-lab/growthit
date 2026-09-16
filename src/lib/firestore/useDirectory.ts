@@ -55,6 +55,13 @@ export function useDirectory(organizationId: string | undefined): Directory {
 
   function displayName(userId: string | null | undefined): string {
     if (!userId) return "-";
+    // 향후추진과제/질의 담당자로 고객사 참석자를 지정한 경우, "client::고객사명::이름" 형태의
+    // 가짜 id로 저장됩니다(고객사 참석자는 시스템 계정이 아니므로 uid가 없음 — 회의 작성 화면의
+    // 담당주체 선택 참고). 실제 사용자 조회 없이 그 자리에서 바로 표시합니다.
+    if (userId.startsWith("client::")) {
+      const [, company, name] = userId.split("::");
+      return [company, name].filter(Boolean).join(" - ");
+    }
     const user = users[userId];
     if (!user) return "(알 수 없는 사용자)";
     return formatUserDisplayName(user, organizations[user.organization_id] ?? null, departments[user.department_id ?? ""] ?? null);
