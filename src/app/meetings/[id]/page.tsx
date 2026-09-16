@@ -95,6 +95,26 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
   const [editQuestionContent, setEditQuestionContent] = useState("");
   const [editQuestionAssignee, setEditQuestionAssignee] = useState("");
 
+  // 1. 개요 — 참석자(인당) 수정/삭제/추가
+  const [editingAttendee, setEditingAttendee] = useState<{ group: "client" | "wylie"; index: number } | null>(null);
+  const [editAttendeeName, setEditAttendeeName] = useState("");
+  const [editAttendeeTitle, setEditAttendeeTitle] = useState("");
+  const [newClientAttendeeName, setNewClientAttendeeName] = useState("");
+  const [newClientAttendeeTitle, setNewClientAttendeeTitle] = useState("");
+  const [newWylieAttendeeName, setNewWylieAttendeeName] = useState("");
+  const [newWylieAttendeeTitle, setNewWylieAttendeeTitle] = useState("");
+
+  // 2. 회의 요약 수정 (텍스트 한 덩어리라 삭제 버튼은 두지 않음 — 수정으로 비울 수 있음)
+  const [editingSummary, setEditingSummary] = useState(false);
+  const [editSummaryText, setEditSummaryText] = useState("");
+
+  // 3. 논의내용(topics) 수정/삭제/추가
+  const [editingTopicIndex, setEditingTopicIndex] = useState<number | null>(null);
+  const [editTopicTitle, setEditTopicTitle] = useState("");
+  const [editTopicContent, setEditTopicContent] = useState("");
+  const [newTopicTitle, setNewTopicTitle] = useState("");
+  const [newTopicContent, setNewTopicContent] = useState("");
+
   const isAdmin = profile?.org_role === "SUPER_ADMIN" || profile?.org_role === "ADMIN";
   const canEdit = myRole === "AUTHOR" || myRole === "PARTICIPANT" || profile?.org_role === "SUPER_ADMIN";
   const isAuthor = myRole === "AUTHOR" || profile?.org_role === "SUPER_ADMIN";
@@ -418,6 +438,130 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
     }
   }
 
+  // ---- 1. 개요: 참석자 수정/삭제/추가 ----
+  // attendees는 meetings 문서 안의 배열 필드라 별도 문서 삭제 규칙이 없고, meetings의 update
+  // 규칙(AUTHOR/PARTICIPANT 허용, member_uids 제외)을 그대로 따르므로 canEdit로 게이팅합니다.
+  async function updateAttendees(next: Meeting["attendees"]) {
+    if (!meeting) return;
+    await updateDoc(doc(db, "meetings", meetingId), { attendees: next });
+    loadAll();
+  }
+
+  function startEditAttendee(group: "client" | "wylie", index: number, person: { name: string; title: string }) {
+    setEditingAttendee({ group, index });
+    setEditAttendeeName(person.name);
+    setEditAttendeeTitle(person.title);
+  }
+
+  async function saveAttendeeEdit() {
+    if (!meeting || !editingAttendee || !editAttendeeName.trim()) return;
+    const { group, index } = editingAttendee;
+    const key = group === "client" ? "client_attendees" : "wylie_attendees";
+    const list = [...meeting.attendees[key]];
+    list[index] = { name: editAttendeeName.trim(), title: editAttendeeTitle.trim() };
+    await updateAttendees({ ...meeting.attendees, [key]: list });
+    setEditingAttendee(null);
+  }
+
+  async function deleteAttendee(group: "client" | "wylie", index: number) {
+    if (!meeting) return;
+    const key = group === "client" ? "client_attendees" : "wylie_attendees";
+    const person = meeting.attendees[key][index];
+    if (!confirm(`"${person.name}" 참석자를 삭제할까요?`)) return;
+    const list = meeting.attendees[key].filter((_, i) => i !== index);
+    await updateAttendees({ ...meeting.attendees, [key]: list });
+    if (editingAttendee?.group === group && editingAttendee.index === index) setEditingAttendee(null);
+  }
+
+  async function addAttendee(group: "client" | "wylie") {
+    if (!meeting) return;
+    const name = group === "client" ? newClientAttendeeName : newWylieAttendeeName;
+    const title = group === "client" ? newClientAttendeeTitle : newWylieAttendeeTitle;
+    if (!name.trim()) return;
+    const key = group === "client" ? "client_attendees" : "wylie_attendees";
+    const list = [...meeting.attendees[key], { name: name.trim(), title: title.trim() }];
+    await updateAttendees({ ...meeting.attendees, [key]: list });
+    if (group === "client") {
+      setNewClientAttendeeName("");
+      setNewClientAttendeeTitle("");
+    } else {
+      setNewWylieAttendeeName("");
+      setNewWylieAttendeeTitle("");
+    }
+  }
+
+  // ---- 2. 회의 요약: 수정 (meetingSummaries 문서가 아직 없으면 새로 만듭니다) ----
+  function startEditSummary() {
+    setEditSummaryText(summary?.summary_text || "");
+    setEditingSummary(true);
+  }
+
+  async function saveSummaryEdit() {
+    const now = Date.now();
+    if (summary) {
+      await updateDoc(doc(db, "meetingSummaries", meetingId), { summary_text: editSummaryText.trim(), updated_at: now });
+    } else {
+      await setDoc(doc(db, "meetingSummaries", meetingId), {
+        id: meetingId,
+        meeting_id: meetingId,
+        summary_text: editSummaryText.trim(),
+        topics: [],
+        created_at: now,
+        updated_at: now,
+      } satisfies MeetingSummary);
+    }
+    setEditingSummary(false);
+    loadAll();
+  }
+
+  // ---- 3. 논의내용(topics): 항목별 수정/삭제/추가 ----
+  function startEditTopic(i: number) {
+    const t = summary?.topics[i];
+    if (!t) return;
+    setEditingTopicIndex(i);
+    setEditTopicTitle(t.title);
+    setEditTopicContent(t.content);
+  }
+
+  async function saveTopicEdit() {
+    if (editingTopicIndex === null || !summary || !editTopicTitle.trim()) return;
+    const topics = [...summary.topics];
+    topics[editingTopicIndex] = { title: editTopicTitle.trim(), content: editTopicContent.trim() };
+    await updateDoc(doc(db, "meetingSummaries", meetingId), { topics, updated_at: Date.now() });
+    setEditingTopicIndex(null);
+    loadAll();
+  }
+
+  async function deleteTopic(i: number) {
+    if (!summary) return;
+    if (!confirm(`"${summary.topics[i].title}" 논의내용을 삭제할까요?`)) return;
+    const topics = summary.topics.filter((_, idx) => idx !== i);
+    await updateDoc(doc(db, "meetingSummaries", meetingId), { topics, updated_at: Date.now() });
+    if (editingTopicIndex === i) setEditingTopicIndex(null);
+    loadAll();
+  }
+
+  async function addTopic() {
+    if (!newTopicTitle.trim()) return;
+    const now = Date.now();
+    if (summary) {
+      const topics = [...summary.topics, { title: newTopicTitle.trim(), content: newTopicContent.trim() }];
+      await updateDoc(doc(db, "meetingSummaries", meetingId), { topics, updated_at: now });
+    } else {
+      await setDoc(doc(db, "meetingSummaries", meetingId), {
+        id: meetingId,
+        meeting_id: meetingId,
+        summary_text: "",
+        topics: [{ title: newTopicTitle.trim(), content: newTopicContent.trim() }],
+        created_at: now,
+        updated_at: now,
+      } satisfies MeetingSummary);
+    }
+    setNewTopicTitle("");
+    setNewTopicContent("");
+    loadAll();
+  }
+
   if (!meeting) {
     return (
       <div className="min-h-screen">
@@ -473,52 +617,138 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
         <section className="card mb-6 p-6">
           <h2 className="mb-3 font-semibold text-ink">1. 개요</h2>
           <div className="grid grid-cols-2 gap-6 text-sm">
-            <div>
-              <p className="mb-1 font-medium text-gray-500">참석자 — {meeting.attendees.client_company_name || "고객사"}</p>
-              {meeting.attendees.client_attendees.length > 0 ? (
-                <ul className="text-ink">
-                  {meeting.attendees.client_attendees.map((a, i) => (
-                    <li key={i}>{a.name} {a.title && `(${a.title})`}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-gray-400">참석자 없음</p>
-              )}
-            </div>
-            <div>
-              <p className="mb-1 font-medium text-gray-500">참석자 — 와일리</p>
-              {meeting.attendees.wylie_attendees.length > 0 ? (
-                <ul className="text-ink">
-                  {meeting.attendees.wylie_attendees.map((a, i) => (
-                    <li key={i}>{a.name} {a.title && `(${a.title})`}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-gray-400">참석자 없음</p>
-              )}
-            </div>
+            {(["client", "wylie"] as const).map((group) => {
+              const list = group === "client" ? meeting.attendees.client_attendees : meeting.attendees.wylie_attendees;
+              const label = group === "client" ? meeting.attendees.client_company_name || "고객사" : "와일리";
+              const newName = group === "client" ? newClientAttendeeName : newWylieAttendeeName;
+              const newTitle = group === "client" ? newClientAttendeeTitle : newWylieAttendeeTitle;
+              return (
+                <div key={group}>
+                  <p className="mb-1 font-medium text-gray-500">참석자 — {label}</p>
+                  {list.length > 0 ? (
+                    <ul className="flex flex-col gap-1 text-ink">
+                      {list.map((a, i) =>
+                        editingAttendee?.group === group && editingAttendee.index === i ? (
+                          <li key={i} className="flex flex-col gap-1 rounded border border-gray-200 p-2">
+                            <input className="input text-xs" value={editAttendeeName} onChange={(e) => setEditAttendeeName(e.target.value)} placeholder="이름" />
+                            <input className="input text-xs" value={editAttendeeTitle} onChange={(e) => setEditAttendeeTitle(e.target.value)} placeholder="직함 (선택)" />
+                            <div className="flex gap-2">
+                              <button className="btn btn-primary text-xs" onClick={saveAttendeeEdit} disabled={!editAttendeeName.trim()}>저장</button>
+                              <button className="btn btn-secondary text-xs" onClick={() => setEditingAttendee(null)}>취소</button>
+                            </div>
+                          </li>
+                        ) : (
+                          <li key={i} className="flex items-center justify-between gap-2">
+                            <span>{a.name} {a.title && `(${a.title})`}</span>
+                            {canEdit && (
+                              <span className="flex flex-shrink-0 gap-2 text-xs">
+                                <button className="text-navy underline" onClick={() => startEditAttendee(group, i, a)}>수정</button>
+                                <button className="text-red-500 underline" onClick={() => deleteAttendee(group, i)}>삭제</button>
+                              </span>
+                            )}
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  ) : (
+                    <p className="text-gray-400">참석자 없음</p>
+                  )}
+                  {canEdit && (
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        className="input flex-1 text-xs"
+                        placeholder="이름"
+                        value={newName}
+                        onChange={(e) =>
+                          group === "client" ? setNewClientAttendeeName(e.target.value) : setNewWylieAttendeeName(e.target.value)
+                        }
+                      />
+                      <input
+                        className="input flex-1 text-xs"
+                        placeholder="직함 (선택)"
+                        value={newTitle}
+                        onChange={(e) =>
+                          group === "client" ? setNewClientAttendeeTitle(e.target.value) : setNewWylieAttendeeTitle(e.target.value)
+                        }
+                      />
+                      <button className="btn btn-secondary text-xs" onClick={() => addAttendee(group)} disabled={!newName.trim()}>추가</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
 
         {/* (2) 회의 요약 */}
         <section className="card mb-6 p-6">
-          <h2 className="mb-3 font-semibold text-ink">2. 회의 요약</h2>
-          <p className="whitespace-pre-line text-sm text-ink">{summary?.summary_text || "요약이 입력되지 않았습니다."}</p>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-semibold text-ink">2. 회의 요약</h2>
+            {canEdit && !editingSummary && (
+              <button className="btn btn-secondary text-xs" onClick={startEditSummary}>수정</button>
+            )}
+          </div>
+          {editingSummary ? (
+            <div className="flex flex-col gap-2">
+              <textarea
+                className="input min-h-[100px] text-sm"
+                value={editSummaryText}
+                onChange={(e) => setEditSummaryText(e.target.value)}
+                placeholder="회의 요약을 입력하세요."
+              />
+              <div className="flex gap-2">
+                <button className="btn btn-primary text-xs" onClick={saveSummaryEdit}>저장</button>
+                <button className="btn btn-secondary text-xs" onClick={() => setEditingSummary(false)}>취소</button>
+              </div>
+            </div>
+          ) : (
+            <p className="whitespace-pre-line text-sm text-ink">{summary?.summary_text || "요약이 입력되지 않았습니다."}</p>
+          )}
         </section>
 
         {/* (3) 논의내용 */}
         <section className="card mb-6 p-6">
           <h2 className="mb-3 font-semibold text-ink">3. 논의내용</h2>
-          {summary && summary.topics.length > 0 ? (
-            summary.topics.map((t, i) => (
-              <div key={i} className="mb-3">
-                <p className="text-sm font-semibold text-navy">{t.title}</p>
-                <p className="whitespace-pre-line text-sm text-gray-600">{t.content}</p>
+          <div className="flex flex-col gap-3">
+            {summary && summary.topics.length > 0 ? (
+              summary.topics.map((t, i) =>
+                editingTopicIndex === i ? (
+                  <div key={i} className="flex flex-col gap-2 rounded-lg border border-gray-200 p-3">
+                    <input className="input text-sm" value={editTopicTitle} onChange={(e) => setEditTopicTitle(e.target.value)} placeholder="제목" />
+                    <textarea className="input text-sm" value={editTopicContent} onChange={(e) => setEditTopicContent(e.target.value)} placeholder="내용" />
+                    <div className="flex gap-2">
+                      <button className="btn btn-primary text-xs" onClick={saveTopicEdit} disabled={!editTopicTitle.trim()}>저장</button>
+                      <button className="btn btn-secondary text-xs" onClick={() => setEditingTopicIndex(null)}>취소</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div key={i} className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-navy">{t.title}</p>
+                      <p className="whitespace-pre-line text-sm text-gray-600">{t.content}</p>
+                    </div>
+                    {canEdit && (
+                      <span className="flex flex-shrink-0 gap-2 text-xs">
+                        <button className="btn btn-secondary text-xs" onClick={() => startEditTopic(i)}>수정</button>
+                        <button className="text-red-500 underline" onClick={() => deleteTopic(i)}>삭제</button>
+                      </span>
+                    )}
+                  </div>
+                )
+              )
+            ) : (
+              <p className="text-sm text-gray-400">등록된 논의내용이 없습니다.</p>
+            )}
+
+            {canEdit && (
+              <div className="rounded-lg bg-gray-50 p-4">
+                <p className="mb-2 text-sm font-medium text-ink">새 논의내용 추가</p>
+                <input className="input mb-2 w-full text-sm" placeholder="제목" value={newTopicTitle} onChange={(e) => setNewTopicTitle(e.target.value)} />
+                <textarea className="input mb-2 w-full text-sm" placeholder="내용" value={newTopicContent} onChange={(e) => setNewTopicContent(e.target.value)} />
+                <button className="btn btn-primary text-xs" onClick={addTopic} disabled={!newTopicTitle.trim()}>등록</button>
               </div>
-            ))
-          ) : (
-            <p className="text-sm text-gray-400">등록된 논의내용이 없습니다.</p>
-          )}
+            )}
+          </div>
         </section>
 
         {/* (4) 향후추진과제 */}
