@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase/admin";
 import { requireSuperAdmin, ApiAuthError } from "@/lib/adminAuthCheck";
+import { syncUserClaims } from "@/lib/firebase/userClaims";
 import type { OrgRole } from "@/lib/types";
 
 const VALID_ROLES: OrgRole[] = ["SUPER_ADMIN", "ADMIN", "USER"];
@@ -51,6 +52,10 @@ export async function POST(req: NextRequest) {
         updated_at: now,
       });
 
+    // 로그인 토큰에 org_role/organization_id를 실어서 Firestore LIST 쿼리 규칙이
+    // 안전하게 admin 여부를 확인할 수 있게 합니다 (자세한 배경은 userClaims.ts 참고).
+    await syncUserClaims(userRecord.uid, { org_role: role, organization_id: targetOrgId });
+
     return NextResponse.json({ uid: userRecord.uid, initial_password: INITIAL_PASSWORD });
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
@@ -92,6 +97,15 @@ export async function PATCH(req: NextRequest) {
     }
 
     await getAdminDb().collection("users").doc(uid).update(safeUpdates);
+
+    // org_role이 바뀌었다면 토큰 클레임도 함께 갱신합니다 (userClaims.ts 참고).
+    if ("org_role" in safeUpdates) {
+      await syncUserClaims(uid, {
+        org_role: safeUpdates.org_role as OrgRole,
+        organization_id: targetSnap.data()!.organization_id,
+      });
+    }
+
     return NextResponse.json({ ok: true });
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
