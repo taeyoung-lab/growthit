@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { updatePassword } from "firebase/auth";
 import { auth } from "@/lib/firebase/client";
 import { AuthGate } from "@/components/AuthGate";
+import { useAuth } from "@/contexts/AuthContext";
 import { authedFetch } from "@/lib/apiClient";
 
 // 5장: 초기 비밀번호(123456)로 로그인한 사용자는 최초 접속 시 반드시 이 화면에서
@@ -15,6 +16,7 @@ function ChangePasswordContent() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
+  const { refreshProfile } = useAuth();
 
   const mismatch = pwConfirm.length > 0 && pw !== pwConfirm;
   const tooShort = pw.length > 0 && pw.length < 8;
@@ -32,6 +34,10 @@ function ChangePasswordContent() {
       if (!user) throw new Error("로그인이 필요합니다.");
       await updatePassword(user, pw);
       await authedFetch("/api/account/mark-password-changed", { method: "POST" });
+      // 서버의 must_change_password가 방금 false로 바뀌었으므로, 이동하기 전에 이 세션의
+      // profile도 다시 읽어와야 합니다 — 그러지 않으면 AuthGate가 캐시된 이전 값(true)을 보고
+      // 곧바로 이 화면으로 되돌려보내서, 화면상으로는 "다음 단계로 진행이 안 되는" 것처럼 보입니다.
+      await refreshProfile();
       router.replace("/");
     } catch (e) {
       setError(e instanceof Error ? e.message : "비밀번호 변경에 실패했습니다. 다시 로그인 후 시도해주세요.");
