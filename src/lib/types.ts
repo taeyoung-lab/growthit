@@ -92,6 +92,32 @@ export interface Project {
   updated_at: number;
 }
 
+// ---- Report Brand (그로스잇 브랜드 정기 성과 리포트 자동화 — Monthly Report 발행 메뉴) --------
+// 자동화 대상 브랜드를 설정 문서로 관리합니다. CMS 로그인 자격증명(아이디·비밀번호 등)은 여기에
+// 저장하지 않고 리포트 발행 시점에 사용자가 직접 입력합니다(2026-09-30 결정) — 이 문서에는
+// 브랜드를 식별/연결하는 데 필요한 값과 로그인 방식 설정값만 둡니다.
+// 신규 브랜드 추가는 이 문서 1건을 등록하는 것으로 끝나도록 설계해, 코드 수정 없이 브랜드를
+// 언제든 추가할 수 있게 합니다(브랜드 관리 화면의 "브랜드 추가" 버튼).
+
+export type ReportBrandStatus = "ACTIVE" | "INACTIVE";
+
+export interface ReportBrand {
+  id: ID;
+  organization_id: ID;
+  company_name: string; // 회사명
+  brand_name: string; // 브랜드명
+  cms_url: string; // CMS 사이트 URL — 최초 등록 시 입력
+  manager_name: string; // 담당자명 (표시용)
+  created_by: ID; // 등록한 사용자 uid — "담당자"로서 수정 권한을 갖는 기준(슈퍼관리자와 함께 유일한 수정 권한자)
+  // 브랜드별 로그인 방식을 코드 분기 대신 설정값(옵션)으로 일반화한 필드 — 브레댄코처럼
+  // ID/PW 로그인 후 전화번호 인증(고정값) 단계가 추가로 있는 브랜드는 true로 등록합니다.
+  // 자동화 스크립트는 이 값을 읽어 헤드리스 브라우저에서 해당 단계를 추가로 처리할지 결정합니다.
+  phone_verification_required: boolean;
+  brand_status: ReportBrandStatus; // INACTIVE = 목록에서 비활성화(soft-delete), 기존 데이터는 보존
+  created_at: number;
+  updated_at: number;
+}
+
 // ---- 6. Meeting ---------------------------------------------------------------
 
 export type MeetingStatus = "SCHEDULED" | "IN_PROGRESS" | "COMPLETED" | "ARCHIVED";
