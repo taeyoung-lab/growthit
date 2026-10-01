@@ -14,11 +14,16 @@ export async function launchBrowser(): Promise<Browser> {
 
   if (isServerless) {
     const chromium = (await import("@sparticuz/chromium")).default;
+    // @sparticuz/chromium이 제공하는 바이너리는 GUI 없이 빌드된 "chrome-headless-shell"입니다.
+    // headless: true(일반 풀 크로미움 가정)로 실행하면 이 바이너리가 기대하지 않는 방식으로
+    // 뜨면서 libnss3.so 등 공유 라이브러리를 찾지 못해 실패합니다(실제 배포에서 재현된 오류).
+    // 공식 문서가 안내하는 대로 headless: "shell"과 puppeteer.defaultArgs를 그대로 따릅니다.
+    // https://github.com/Sparticuz/chromium#readme
     return puppeteer.launch({
-      args: chromium.args,
+      args: await puppeteer.defaultArgs({ args: chromium.args, headless: "shell" }),
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: true,
+      headless: "shell",
     });
   }
 
