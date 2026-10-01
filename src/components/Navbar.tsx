@@ -9,6 +9,7 @@ import { useAuth } from "@/contexts/AuthContext";
 const LINKS = [
   { href: "/", label: "메인" },
   { href: "/projects", label: "프로젝트" },
+  { href: "/brands", label: "브랜드 관리" },
   { href: "/me", label: "내 업무" },
   { href: "/qna", label: "Q&A 관리", adminOnly: true },
   { href: "/admin", label: "관리자", superAdminOnly: true },
