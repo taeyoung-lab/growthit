@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { addDoc, collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
+import { collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
 import { db } from "@/lib/firebase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthGate } from "@/components/AuthGate";
 import { Navbar } from "@/components/Navbar";
+import { authedFetch } from "@/lib/apiClient";
 import type { ReportBrand } from "@/lib/types";
 
 // 그로스잇 브랜드 정기 성과 리포트 자동화 — "Monthly Report 발행" 메뉴가 사용할 브랜드 설정을
@@ -86,9 +87,22 @@ function BrandsContent() {
                   {b.phone_verification_required && (
                     <span className="badge bg-amber-100 text-amber-800">2차 인증(전화번호)</span>
                   )}
+                  {b.has_saved_credentials ? (
+                    <span className="badge bg-emerald-100 text-emerald-800">계정 저장됨</span>
+                  ) : (
+                    <span className="badge bg-gray-100 text-gray-500">계정 미등록</span>
+                  )}
+                  {b.backfill_status && b.backfill_status !== "COMPLETED" && (
+                    <span className="badge bg-blue-100 text-blue-800">
+                      백필 {b.backfill_status === "PENDING" ? "대기" : b.backfill_status === "IN_PROGRESS" ? "진행 중" : "실패"}
+                    </span>
+                  )}
                 </div>
                 <div className="truncate text-sm text-gray-400">{b.cms_url}</div>
-                <div className="text-xs text-gray-400">담당자: {b.manager_name}</div>
+                <div className="text-xs text-gray-400">
+                  담당자: {b.manager_name}
+                  {b.service_open_date && ` · 서비스 오픈일: ${b.service_open_date}`}
+                </div>
               </div>
               <div className="flex shrink-0 gap-2">
                 {canEdit(b) ? (
@@ -180,6 +194,10 @@ function BrandModal({
   const [cmsUrl, setCmsUrl] = useState(brand?.cms_url ?? "");
   const [managerName, setManagerName] = useState(brand?.manager_name ?? profile?.user_name ?? "");
   const [phoneVerification, setPhoneVerification] = useState(brand?.phone_verification_required ?? false);
+  const [serviceOpenDate, setServiceOpenDate] = useState(brand?.service_open_date ?? "");
+  const [cmsUsername, setCmsUsername] = useState("");
+  const [cmsPassword, setCmsPassword] = useState("");
+  const [fixedVerificationCode, setFixedVerificationCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -190,35 +208,28 @@ function BrandModal({
     if (!profile || !companyName.trim() || !brandName.trim() || !cmsUrl.trim() || !managerName.trim()) return;
     setSubmitting(true);
     setError(null);
-    const now = Date.now();
     try {
+      const payload = {
+        company_name: companyName.trim(),
+        brand_name: brandName.trim(),
+        cms_url: cmsUrl.trim(),
+        manager_name: managerName.trim(),
+        phone_verification_required: phoneVerification,
+        service_open_date: serviceOpenDate.trim() || null,
+        // 수정 화면에서 비워두면 기존 저장된 계정 정보를 그대로 유지합니다(재입력 강제 안 함).
+        cms_username: cmsUsername.trim() || null,
+        cms_password: cmsPassword || null,
+        fixed_verification_code: fixedVerificationCode.trim() || null,
+      };
       if (isCreate) {
-        await addDoc(collection(db, "brands"), {
-          organization_id: profile.organization_id,
-          company_name: companyName.trim(),
-          brand_name: brandName.trim(),
-          cms_url: cmsUrl.trim(),
-          manager_name: managerName.trim(),
-          created_by: profile.id,
-          phone_verification_required: phoneVerification,
-          brand_status: "ACTIVE",
-          created_at: now,
-          updated_at: now,
-        });
+        await authedFetch("/api/brands", { method: "POST", body: JSON.stringify(payload) });
       } else {
-        await updateDoc(doc(db, "brands", brand.id), {
-          company_name: companyName.trim(),
-          brand_name: brandName.trim(),
-          cms_url: cmsUrl.trim(),
-          manager_name: managerName.trim(),
-          phone_verification_required: phoneVerification,
-          updated_at: now,
-        });
+        await authedFetch("/api/brands", { method: "PATCH", body: JSON.stringify({ id: brand.id, ...payload }) });
       }
       onDone();
     } catch (e) {
       console.error("[BrandModal] 브랜드 저장 실패:", e);
-      setError("저장에 실패했습니다. 잠시 후 다시 시도해주세요.");
+      setError(e instanceof Error ? e.message : "저장에 실패했습니다. 잠시 후 다시 시도해주세요.");
     } finally {
       setSubmitting(false);
     }
@@ -260,6 +271,65 @@ function BrandModal({
             />
             로그인 시 전화번호 인증(2차 인증) 단계가 있음 — 예: 브레댄코
           </label>
+          {phoneVerification && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">
+                고정 인증번호 {!isCreate && brand?.has_saved_credentials ? "(변경 시에만 입력)" : ""}
+              </label>
+              <input
+                className="input w-full"
+                placeholder={
+                  !isCreate && brand?.has_saved_credentials ? "저장된 인증번호 유지" : "실제 SMS 없이 항상 동일하게 쓰는 인증번호"
+                }
+                value={fixedVerificationCode}
+                onChange={(e) => setFixedVerificationCode(e.target.value)}
+                autoComplete="off"
+              />
+              <p className="mt-1 text-[11px] text-gray-400">
+                CMS 계정과 마찬가지로 암호화해 저장하고, 자동 로그인 시 전화번호 인증 단계에 자동으로 입력됩니다.
+              </p>
+            </div>
+          )}
+
+          <hr className="my-1 border-gray-100" />
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">서비스 오픈일 (선택)</label>
+            <input
+              className="input w-full"
+              type="date"
+              value={serviceOpenDate}
+              onChange={(e) => setServiceOpenDate(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-gray-400">
+              입력하면 등록 직후 이 날짜부터 전월까지의 과거 데이터를 CMS에서 한 번에 가져와 반영합니다(백필).
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              CMS 계정 {isCreate ? "(선택 — 나중에 발행 화면에서도 등록 가능)" : "(변경 시에만 입력)"}
+            </label>
+            <div className="flex gap-2">
+              <input
+                className="input w-full"
+                placeholder={!isCreate && brand?.has_saved_credentials ? "저장된 아이디 유지" : "CMS 로그인 아이디"}
+                value={cmsUsername}
+                onChange={(e) => setCmsUsername(e.target.value)}
+                autoComplete="off"
+              />
+              <input
+                className="input w-full"
+                type="password"
+                placeholder={!isCreate && brand?.has_saved_credentials ? "저장된 비밀번호 유지" : "CMS 로그인 비밀번호"}
+                value={cmsPassword}
+                onChange={(e) => setCmsPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+            </div>
+            <p className="mt-1 text-[11px] text-gray-400">
+              매월 재입력하지 않도록 암호화해 저장하고, Monthly Report 발행 시 자동으로 채워집니다.
+            </p>
+          </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="mt-2 flex justify-end gap-2">
             <button type="button" className="btn btn-secondary" onClick={onClose}>
@@ -282,4 +352,3 @@ export default function BrandsPage() {
     </AuthGate>
   );
 }
-
