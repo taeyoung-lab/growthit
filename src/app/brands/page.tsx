@@ -22,6 +22,35 @@ function BrandsContent() {
   const [modalMode, setModalMode] = useState<"create" | ReportBrand | null>(null);
   const [confirmToggleId, setConfirmToggleId] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(false);
+  // CMS 자동 수집 모듈(collect.ts) 구현 완료 후 실제 환경에서 처음 돌려보기 위한 임시 트리거 —
+  // 정식 "Monthly Report 발행" 메뉴(화면①~⑤)가 생기기 전까지, 브랜드 관리 화면에서 바로
+  // /api/brands/{id}/collect를 한 번 호출해볼 수 있게 해 둡니다. 정식 발행 메뉴가 구현되면
+  // 이 버튼은 제거하고 그쪽으로 옮겨도 됩니다.
+  const [collectingId, setCollectingId] = useState<string | null>(null);
+  const [collectResult, setCollectResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+
+  async function runCollect(b: ReportBrand) {
+    const now = new Date();
+    const yearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    setCollectingId(b.id);
+    setCollectResult(null);
+    try {
+      const data = await authedFetch(`/api/brands/${b.id}/collect`, {
+        method: "POST",
+        body: JSON.stringify({ year_month: yearMonth }),
+      });
+      setCollectResult({
+        id: b.id,
+        ok: true,
+        message: `수집 성공 (${data.year_month}) — 대시보드 매출: ${JSON.stringify(data.data?.data?.dashboard ?? {}).slice(0, 200)}`,
+      });
+    } catch (e) {
+      console.error("[BrandsPage] 수집 실패:", e);
+      setCollectResult({ id: b.id, ok: false, message: e instanceof Error ? e.message : "수집에 실패했습니다." });
+    } finally {
+      setCollectingId(null);
+    }
+  }
 
   async function load() {
     if (!profile) return;
@@ -103,8 +132,22 @@ function BrandsContent() {
                   담당자: {b.manager_name}
                   {b.service_open_date && ` · 서비스 오픈일: ${b.service_open_date}`}
                 </div>
+                {collectResult && collectResult.id === b.id && (
+                  <p className={`mt-1 break-all text-xs ${collectResult.ok ? "text-emerald-700" : "text-red-600"}`}>
+                    {collectResult.message}
+                  </p>
+                )}
               </div>
               <div className="flex shrink-0 gap-2">
+                {b.has_saved_credentials && (
+                  <button
+                    className="btn btn-secondary text-xs"
+                    disabled={collectingId === b.id}
+                    onClick={() => runCollect(b)}
+                  >
+                    {collectingId === b.id ? "수집 중..." : "지금 수집(테스트)"}
+                  </button>
+                )}
                 {canEdit(b) ? (
                   <>
                     <button className="btn btn-secondary text-xs" onClick={() => setModalMode(b)}>
