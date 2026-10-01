@@ -93,13 +93,19 @@ export interface Project {
 }
 
 // ---- Report Brand (그로스잇 브랜드 정기 성과 리포트 자동화 — Monthly Report 발행 메뉴) --------
-// 자동화 대상 브랜드를 설정 문서로 관리합니다. CMS 로그인 자격증명(아이디·비밀번호 등)은 여기에
-// 저장하지 않고 리포트 발행 시점에 사용자가 직접 입력합니다(2026-09-30 결정) — 이 문서에는
-// 브랜드를 식별/연결하는 데 필요한 값과 로그인 방식 설정값만 둡니다.
+// 자동화 대상 브랜드를 설정 문서로 관리합니다.
 // 신규 브랜드 추가는 이 문서 1건을 등록하는 것으로 끝나도록 설계해, 코드 수정 없이 브랜드를
 // 언제든 추가할 수 있게 합니다(브랜드 관리 화면의 "브랜드 추가" 버튼).
+//
+// 2026-10-01 결정 변경: CMS 로그인 자격증명(아이디·비밀번호)은 "매번 직접 입력" 대신
+// "저장 후 자동 입력/재사용"으로 확정됨(화면 설계 탭 결정 사항 참고). 단, 비밀번호 평문은
+// 이 문서(브랜드 전체에서 읽을 수 있는 /brands 컬렉션)에 절대 두지 않고, 클라이언트 Firestore
+// 읽기가 전면 차단된 별도 컬렉션 brandCredentials/{brandId}(src/lib/types.ts의 BrandCredentials)에
+// 서버(firebase-admin, src/app/api/brands)에서만 암호화해 저장·조회합니다. 이 문서에는 "계정이
+// 저장돼 있는지" 여부만 비밀값 없이 보여주는 has_saved_credentials 플래그만 둡니다.
 
 export type ReportBrandStatus = "ACTIVE" | "INACTIVE";
+export type BackfillStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
 export interface ReportBrand {
   id: ID;
@@ -113,9 +119,66 @@ export interface ReportBrand {
   // ID/PW 로그인 후 전화번호 인증(고정값) 단계가 추가로 있는 브랜드는 true로 등록합니다.
   // 자동화 스크립트는 이 값을 읽어 헤드리스 브라우저에서 해당 단계를 추가로 처리할지 결정합니다.
   phone_verification_required: boolean;
+  // CMS 계정이 brandCredentials에 저장돼 있는지 여부(비밀값은 아님, UI 표시·분기용) —
+  // true면 Monthly Report 발행 화면②에서 계정 입력란이 자동으로 채워진 상태로 표시됩니다.
+  has_saved_credentials: boolean;
+  // 서비스 오픈일(YYYY-MM-DD) — 브랜드 생성 시 입력. 설정돼 있으면 등록 직후 이 날짜부터
+  // 현재월의 전월까지 과거 데이터를 CMS에서 한 번에 가져와 DB(brandMonthlyData)에 반영하는
+  // 백필(backfill)이 자동 실행됩니다(월별 리뷰 없이 일괄 반영, PPT는 생성하지 않음 — 2026-10-01 결정).
+  service_open_date: string | null;
+  backfill_status: BackfillStatus | null; // 백필 미대상(서비스 오픈일 미입력)이면 null
+  backfill_completed_through: string | null; // 백필이 반영 완료된 가장 최근 연월(YYYY-MM), 진행률 표시용
+  // 가장 최근으로 "발행"(PPT 생성)까지 완료된 연월(YYYY-MM) — 화면④의 전월대비(MoM) 자동 조회,
+  // 화면①의 "기존 발행 이력 유무" 표시에 사용. 백필로만 채워진 월은 포함하지 않습니다.
+  last_published_month: string | null;
   brand_status: ReportBrandStatus; // INACTIVE = 목록에서 비활성화(soft-delete), 기존 데이터는 보존
   created_at: number;
   updated_at: number;
+}
+
+// brandCredentials/{brandId} — CMS 로그인 자격증명 전용 컬렉션. firestore.rules에서 클라이언트의
+// read/write를 전면 차단하고(allow read, write: if false), src/app/api/brands의 서버 코드(firebase-admin)
+// 에서만 접근합니다. cms_password는 평문이 아니라 src/lib/cmsCredentials.ts로 암호화한 값입니다.
+export interface BrandCredentials {
+  brand_id: ID;
+  cms_username: string;
+  cms_password_encrypted: string;
+  // 브레댄코처럼 phone_verification_required=true인 브랜드만 사용. 실제 SMS가 오는 게 아니라
+  // 항상 동일한 고정 인증번호를 쓰는 구조라, cms_password와 동일한 방식(AES-256-GCM)으로
+  // 암호화해 저장합니다. phone_verification_required=false인 브랜드는 null.
+  fixed_verification_code_encrypted: string | null;
+  updated_by: ID;
+  updated_at: number;
+}
+
+// brandMonthlyData/{brandId}_{yyyyMM} — 브랜드×연월 단위로 CMS에서 수집한 raw 집계 데이터 1건.
+// 월간 발행 플로우(화면③→④)와 백필 둘 다 이 컬렉션에 씁니다. 8개 섹션 원본값은 data에 그대로 두고,
+// 사용자가 화면④에서 직접 고친 값(수수료 키인값 등)은 overrides에 별도로 보관해 원본과 구분합니다.
+export type BrandMonthlyDataSource = "MANUAL" | "BACKFILL";
+
+export interface BrandMonthlyData {
+  id: ID; // `${brand_id}_${year_month}`
+  organization_id: ID;
+  brand_id: ID;
+  year_month: string; // YYYY-MM
+  source: BrandMonthlyDataSource; // 월간 발행 플로우에서 수집했는지, 백필로 수집했는지
+  data: Record<string, unknown>; // CMS에서 수집한 8개 섹션 원본 집계값
+  overrides: Record<string, unknown>; // 화면④에서 담당자가 직접 수정한 값(수수료 키인값 등)
+  published: boolean; // PPT까지 생성해 발행 완료했는지 — 백필 전용 월은 false로 남음
+  collected_at: number;
+  collected_by: ID | null; // 백필처럼 서버가 자동 실행한 경우 null
+  updated_at: number;
+}
+
+// reportPublishHistory/{id} — 화면⑤ "발행 이력". PPT 생성까지 완료된 건만 남습니다.
+export interface ReportPublishHistory {
+  id: ID;
+  organization_id: ID;
+  brand_id: ID;
+  year_month: string; // YYYY-MM — 당월·과거월 재발행 모두 가능(화면① 참고)
+  ppt_storage_path: string;
+  published_by: ID;
+  published_at: number;
 }
 
 // ---- 6. Meeting ---------------------------------------------------------------
