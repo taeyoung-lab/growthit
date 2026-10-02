@@ -87,14 +87,16 @@ async function getDashboard(
   variant: DashboardVariant,
   cmsUrl: string,
   cookieHeader: string,
+  yearMonth: string,
   endDt: string
 ): Promise<unknown> {
   if (variant === "granular") {
     // 처갓집형 — /api/dashboard가 없고 요약 통계는 /api/dashboard/summary로 분리돼 있습니다.
-    // 쿼리 파라미터는 표준형 대시보드 호출과 동일한 패턴(searchTp=month&searchDt=월말일)을
-    // 썼습니다 — 실제 월간 집계로 동작하는지는 이번 변경 적용 후 첫 "지금 수집(테스트)" 실행
-    // 결과로 확인이 필요합니다(라이브 관찰 시엔 UI 기본값인 "오늘 하루"만 확인했습니다).
-    const query = `searchTp=month&isStoreAdmin=false&storeNm=&storeId=0&searchDt=${endDt}`;
+    // 2026-10-02 라이브 재검증: 표준형과 달리 searchTp=month일 때 searchDt는 전체 날짜
+    // (YYYY-MM-DD)가 아니라 연-월(YYYY-MM)만 받습니다 — 전체 날짜를 넘기면 서버가 이를
+    // 엉뚱한 단일 일자로 해석해 주문수가 음수로 나오는 등 월 집계가 깨지는 것을 확인했습니다
+    // (처갓집 CMS를 직접 열어 월조회 전환 시 실제 네트워크 요청을 캡처해 확인).
+    const query = `searchTp=month&isStoreAdmin=false&storeNm=&storeId=0&searchDt=${yearMonth}`;
     return getJson(cmsUrl, `/api/dashboard/summary?${query}`, cookieHeader);
   }
   const query =
@@ -112,14 +114,16 @@ async function getSettlements(
 ): Promise<unknown> {
   if (variant === "dateRange") {
     // 샐러리아형 — searchTp 자체가 없고 searchStartDt~searchEndDt로 범위를 직접 지정합니다.
-    // 라이브 관찰 시엔 UI 기본값인 "오늘 하루"(startDt=endDt)만 확인했으므로, 월 전체 범위
-    // (월초~월말)를 넘겼을 때도 정상 동작하는지는 첫 실행 결과로 확인이 필요합니다.
+    // 2026-10-02 실제 월간 수집(2026-09)으로 재검증 완료 — 대시보드와 정산 금액·주문건수가
+    // 정확히 일치함을 확인했습니다(매출 10,337,800원·826건 동일).
     const query = `page=1&perPage=500&storeNm=&storeId=&orderGb=&searchOrderGb=&searchStartDt=${startDt}&searchEndDt=${endDt}`;
     return getJson(cmsUrl, `/api/settlements/sales?${query}`, cookieHeader);
   }
   if (variant === "settleRange") {
-    // 처갓집형 — dateType=SETTLE + fromDt~toDt. 마찬가지로 라이브 관찰 시엔 "오늘 하루"만
-    // 확인했으므로 월 전체 범위 적용 결과는 첫 실행 후 확인이 필요합니다.
+    // 처갓집형 — dateType=SETTLE + fromDt~toDt(월초~월말). 2026-10-02 라이브 재검증(처갓집
+    // CMS 매출 정산 화면에서 "이전달" 이동 후 검색) 결과 이 쿼리 형태가 실제 화면 요청과
+    // 정확히 일치함을 확인했습니다. (9월 정산액이 0으로 나오는 건 쿼리 문제가 아니라 — 같은
+    // 화면에서도 0으로 뜸 — 이 브랜드가 아직 정산 발생 전/테스트 데이터 상태이기 때문입니다.)
     const query = `page=1&perPage=500&storeNm=&storeId=&dateType=SETTLE&fromDt=${startDt}&toDt=${endDt}`;
     return getJson(cmsUrl, `/api/settlements/sales?${query}`, cookieHeader);
   }
@@ -140,7 +144,7 @@ export async function collectMonthlyData(
   const targetGroupQuery = `page=1&perPage=31&endDt=${endDt}`;
 
   const [dashboard, settlementsSales, targetGroupStats] = await Promise.all([
-    getDashboard(variant.dashboard, cmsUrl, cookieHeader, endDt),
+    getDashboard(variant.dashboard, cmsUrl, cookieHeader, yearMonth, endDt),
     getSettlements(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
     getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
   ]);
