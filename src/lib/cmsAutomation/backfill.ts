@@ -37,7 +37,10 @@ const SESSION_CACHE_TTL_MS = 20 * 60 * 1000; // 20분
 // 재발함. 그래서 "달 시작 전" 체크를 고정 예산이 아니라 "지금 시작하면 최악의 경우(이번 달이
 // CMS_FETCH_TIMEOUT_MS를 꽉 채움)에도 하드 리밋 전에 안전하게 끝나는가"로 바꿈 — collect.ts의
 // 타임아웃 값이 나중에 또 바뀌어도 이 계산식이 자동으로 따라가므로 같은 실수가 반복되지 않습니다.
-const HARD_LIMIT_MS = 60_000; // route.ts의 maxDuration과 일치시켜야 함
+// 2026-10-02: 60초는 Vercel 플랫폼 한도가 아니라 이 프로젝트가 초반에 임의로 넣어둔 값이었음
+// (공식 문서 확인 결과 Hobby 플랜도 Fluid Compute 기준 300초까지 지원 — route.ts 상단 주석 참고).
+// 브래덴코 2026-04가 54초 타임아웃도 일관되게 초과(재현 측정 56.1초)해 120초로 상향(담당자 확인).
+const HARD_LIMIT_MS = 120_000; // route.ts의 maxDuration과 일치시켜야 함
 const SAFETY_MARGIN_MS = 5_000; // Firestore 쓰기·응답 반환에 쓸 여유 시간
 
 // 서비스 오픈일(YYYY-MM-DD)의 달부터 "전월"(당월 제외 — 당월은 아직 끝나지 않아 집계 의미가 없음)
