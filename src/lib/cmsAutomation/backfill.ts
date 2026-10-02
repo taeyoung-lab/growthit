@@ -172,6 +172,8 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
           dashboard: collected.dashboard,
           settlementsSales: collected.settlementsSales,
           targetGroupStats: collected.targetGroupStats,
+          storeManage: collected.storeManage,
+          memberStats: collected.memberStats,
         },
         overrides: {},
         published: false,
