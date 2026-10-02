@@ -127,7 +127,17 @@ export interface ReportBrand {
   // 백필(backfill)이 자동 실행됩니다(월별 리뷰 없이 일괄 반영, PPT는 생성하지 않음 — 2026-10-01 결정).
   service_open_date: string | null;
   backfill_status: BackfillStatus | null; // 백필 미대상(서비스 오픈일 미입력)이면 null
-  backfill_completed_through: string | null; // 백필이 반영 완료된 가장 최근 연월(YYYY-MM), 진행률 표시용
+  // 백필이 "지나간" 가장 최근 연월(YYYY-MM), 진행률 표시용 — 실제로 데이터가 반영된 달뿐 아니라
+  // 아래 backfill_skipped_months에 기록된, CMS 자체 문제로 건너뛴 달도 포함해 전진합니다(한 달이
+  // 계속 실패한다고 그 뒤 달들까지 영원히 막히지 않도록 — 2026-10-02 결정, backfill.ts 참고).
+  backfill_completed_through: string | null;
+  // 2026-10-02: 재시도로도 해결되지 않는 CMS 서버 자체의 문제(예: 브래덴코 2026-06 정산 조회가
+  // 저희 타임아웃 설정과 무관하게 매번 정확히 60초에 504로 끊기는 것을 직접 재현까지 포함해
+  // 3회 연속 확인 — 담당자 확인 후 해당 달은 건너뛰고 다음 달부터 진행하기로 결정)로 인해
+  // 실제 데이터 없이 건너뛴 연월(YYYY-MM) 목록 — 브랜드 관리 화면에 표시해 담당자가 나중에
+  // CMS 쪽과 별도로 확인/재수집할 수 있게 합니다. 백필 미대상 브랜드이거나 아직 건너뛴 달이
+  // 없으면 빈 배열.
+  backfill_skipped_months: string[];
   // 가장 최근으로 "발행"(PPT 생성)까지 완료된 연월(YYYY-MM) — 화면④의 전월대비(MoM) 자동 조회,
   // 화면①의 "기존 발행 이력 유무" 표시에 사용. 백필로만 채워진 월은 포함하지 않습니다.
   last_published_month: string | null;
