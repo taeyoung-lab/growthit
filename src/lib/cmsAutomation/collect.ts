@@ -72,11 +72,33 @@ function firstDayOfMonth(yearMonth: string): string {
   return `${yearMonth}-01`;
 }
 
+// 2026-10-02: 테스트_브래덴코 백필 중 Vercel 함수가 60초 하드 타임아웃으로 강제 종료되는 사고가
+// 발생. 원인 확인 결과 이 브랜드의 CMS 응답이 유독 느려서(영커피 월평균 1.36초 vs 브래덴코 월평균
+// 10초+) backfill.ts의 TIME_BUDGET_MS(45초) 체크는 "달 시작 전"에만 보기 때문에, 느린 호출 하나가
+// 진행 중인 동안은 멈출 방법이 없어 그대로 Vercel 하드 리밋에 끌려가 강제 종료됨 — backfill_status가
+// IN_PROGRESS에 멈춘 채로 남는 등 불완전한 상태가 됨. 요청 1건마다 타임아웃을 걸어, 느린 CMS라도
+// "그 달만" 실패 처리되고 backfill.ts의 기존 catch 블록이 정상적으로 FAILED + 부분 진행상황 저장을
+// 하도록 만듦(= Vercel에 강제로 죽는 것보다 훨씬 안전한 실패 모드로 전환).
+const CMS_FETCH_TIMEOUT_MS = 15_000;
+
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
-  const res = await fetch(url, {
-    headers: { Cookie: cookieHeader, Accept: "application/json" },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CMS_FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { Cookie: cookieHeader, Accept: "application/json" },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`CMS API 응답 지연(${CMS_FETCH_TIMEOUT_MS / 1000}초 초과) — ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) {
     throw new Error(`CMS API 호출 실패 (${res.status}) — ${url}`);
   }
