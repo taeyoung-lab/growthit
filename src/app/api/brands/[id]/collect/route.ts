@@ -101,6 +101,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         dashboard: collected.dashboard,
         settlementsSales: collected.settlementsSales,
         targetGroupStats: collected.targetGroupStats,
+        storeManage: collected.storeManage,
+        memberStats: collected.memberStats,
       },
       // 기존에 담당자가 화면④에서 직접 고친 값(overrides)이 있다면 재수집 시에도 보존합니다 —
       // 원본(data)만 최신 수집값으로 갈아끼우고, 사람이 직접 고친 값은 자동 덮어쓰기 대상이 아닙니다.
