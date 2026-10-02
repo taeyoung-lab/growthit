@@ -118,6 +118,28 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     // 진단하기 위함입니다.
     log(`cookies collected (names only): ${cookies.map((c) => c.name).join(", ")}`);
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+    // 2026-10-02: 에그드랍은 로그인(URL 이동, 세션 쿠키 발급)까지는 정상처럼 보이는데도 collect.ts의
+    // 일반 fetch() 호출이 401로 거부되고, 처갓집양념치킨은 아예 에러 없이 200으로 응답하면서 매출·주문·
+    // 회원 수치가 전부 0으로 나오는 현상이 발견됨(둘 다 영커피 등 정상 브랜드와 쿠키 캡처 타이밍은
+    // 동일했음 — 단순 타이밍 문제가 아님). 원인이 "브라우저 밖으로 꺼낸 쿠키 문자열 자체가 불완전/
+    // 손실됐는지" 아니면 "그 세션 자체가 서버 쪽에서 이미 유효하지 않은지"인지 구분하기 위해, 브라우저
+    // 세션이 살아있는 상태에서(=쿠키 내보내기 없이) 브라우저 자신의 fetch로 동일 API를 한 번 호출해
+    // 결과를 비교합니다. 여기서 성공하면 "쿠키 내보내기 손실" 쪽, 여기서도 401/실패면 "세션 자체가
+    // 무효" 쪽으로 원인을 좁힐 수 있습니다. 응답 바디는 로그에 남기지 않고 상태코드만 남깁니다.
+    const probeUrl = new URL("/api/dashboard", config.cmsUrl).toString();
+    const probeResult = await page
+      .evaluate(async (url: string) => {
+        try {
+          const res = await fetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+          return { ok: res.ok, status: res.status };
+        } catch (err) {
+          return { ok: false, status: -1, error: String(err) };
+        }
+      }, probeUrl)
+      .catch((err) => ({ ok: false, status: -2, error: String(err) }));
+    log(`in-browser fetch probe (${probeUrl}): ${JSON.stringify(probeResult)}`);
+
     return { cookieHeader };
   } finally {
     log("closing browser");
