@@ -60,12 +60,14 @@ function BrandsContent() {
     setBackfillResult(null);
     try {
       const result = await authedFetch(`/api/brands/${b.id}/backfill`, { method: "POST" });
+      const skippedNote =
+        result.skippedMonths?.length > 0 ? ` (CMS 자체 문제로 건너뜀: ${result.skippedMonths.join(", ")})` : "";
       setBackfillResult({
         id: b.id,
         ok: true,
         message: result.done
-          ? "백필 완료 — 서비스 오픈일부터 전월까지 전부 반영됐습니다."
-          : `이번 실행에서 ${result.processedMonths.length}개월 처리함 — 아직 남아 있어 "백필 이어하기"를 다시 눌러주세요.`,
+          ? `백필 완료 — 서비스 오픈일부터 전월까지 전부 반영됐습니다.${skippedNote}`
+          : `이번 실행에서 ${result.processedMonths.length}개월 처리함${skippedNote} — 아직 남아 있어 "백필 이어하기"를 다시 눌러주세요.`,
       });
       await load();
     } catch (e) {
@@ -157,6 +159,14 @@ function BrandsContent() {
                   담당자: {b.manager_name}
                   {b.service_open_date && ` · 서비스 오픈일: ${b.service_open_date}`}
                 </div>
+                {b.backfill_skipped_months && b.backfill_skipped_months.length > 0 && (
+                  // CMS 서버 자체의 게이트웨이 타임아웃(504)으로 재시도해도 해결되지 않아 건너뛴 달 —
+                  // backfill.ts의 GATEWAY_TIMEOUT 처리 참고. 데이터가 비어 있는 달이니 담당자가
+                  // CMS 쪽과 별도로 확인/재수집할 수 있도록 계속 보이게 둡니다.
+                  <p className="mt-1 text-xs text-amber-700">
+                    CMS 응답 지연으로 건너뛴 달(데이터 없음): {b.backfill_skipped_months.join(", ")}
+                  </p>
+                )}
                 {collectResult && collectResult.id === b.id && (
                   <p className={`mt-1 break-all text-xs ${collectResult.ok ? "text-emerald-700" : "text-red-600"}`}>
                     {collectResult.message}
