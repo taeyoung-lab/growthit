@@ -26,8 +26,12 @@ export interface CmsCollectionResult {
 }
 
 export class CmsAutomationError extends Error {
-  step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT";
-  constructor(message: string, step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT") {
+  // "SESSION_EXPIRED": 2026-10-02 로그인 세션 재사용 도입 — 캐시해둔 쿠키로 호출했는데 CMS가
+  // 401/403을 돌려줬을 때만 씁니다(collect.ts의 getJson 참고). backfill.ts가 이 경우를 일반
+  // COLLECT 실패와 구분해, 브랜드를 FAILED로 표시하는 대신 캐시된 세션만 비우고 다음 실행에서
+  // 재로그인하도록 처리합니다.
+  step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED";
+  constructor(message: string, step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED") {
     super(message);
     this.step = step;
   }
