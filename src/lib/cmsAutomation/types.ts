@@ -22,6 +22,12 @@ export interface CmsCollectionResult {
   dashboard: unknown; // GET /api/dashboard (월조회) 원본 응답 — 매출·주문수·회원수 등
   settlementsSales: unknown; // GET /api/settlements/sales (월조회) 원본 응답 — 수수료 실측값
   targetGroupStats: unknown; // GET /api/stats/targetGroup 원본 응답 — 회원 세그먼트
+  // 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증 — 처갓집/샐러리아는
+  // 미검증). 위 3개와 달리 조회 실패 시에도 전체 수집이 실패하지 않도록 null을 허용합니다
+  // (collect.ts의 Promise.allSettled 처리 참고) — 아직 해당 브랜드 CMS에 이 엔드포인트가
+  // 존재하는지 확인되지 않았으므로, 실패해도 기존 3개 데이터는 정상적으로 저장되게 하기 위함.
+  storeManage: unknown | null; // GET /api/storeManage 원본 응답 — 매장 목록(상태·스탬프·배달/픽업 등)
+  memberStats: unknown | null; // GET /api/stats/member 원본 응답 — 월말 기준 성별×연령대 회원 등급 분포
   collectedAt: number;
 }
 
