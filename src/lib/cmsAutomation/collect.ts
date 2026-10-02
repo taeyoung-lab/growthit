@@ -79,7 +79,14 @@ function firstDayOfMonth(yearMonth: string): string {
 // IN_PROGRESS에 멈춘 채로 남는 등 불완전한 상태가 됨. 요청 1건마다 타임아웃을 걸어, 느린 CMS라도
 // "그 달만" 실패 처리되고 backfill.ts의 기존 catch 블록이 정상적으로 FAILED + 부분 진행상황 저장을
 // 하도록 만듦(= Vercel에 강제로 죽는 것보다 훨씬 안전한 실패 모드로 전환).
-const CMS_FETCH_TIMEOUT_MS = 15_000;
+//
+// 15초로 처음 배포했다가 브래덴코 2025-08 정산 조회가 매번 타임아웃되는 것을 확인 — 버그가 아니라
+// 브래덴코 CMS 자체가 느린 게 맞는지 직접 라이브로 검증함(브래덴코 CMS에 로그인해 매출 정산 화면을
+// 월조회·2025-08로 직접 조회 — 42개 매장·996건 주문 집계라 5초 시점엔 아직 이전 응답이었고 15초
+// 시점엔 이미 새 결과가 떠 있었음, 즉 실제 CMS 응답 자체가 10~15초대). 42개 매장(영커피 등은 매장
+// 1곳)이라 집계량이 커서 생기는 정상적인 지연이므로, 쿼리를 바꾸는 대신 타임아웃을 30초로 올림 —
+// 로그인(~6초)+한 달치 조회(~15초 내외)를 합쳐도 60초 하드 리밋에 여유 있게 들어옴.
+const CMS_FETCH_TIMEOUT_MS = 30_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
