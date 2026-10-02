@@ -28,6 +28,9 @@ function BrandsContent() {
   // 이 버튼은 제거하고 그쪽으로 옮겨도 됩니다.
   const [collectingId, setCollectingId] = useState<string | null>(null);
   const [collectResult, setCollectResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+  // 백필(서비스 오픈일~전월 과거 데이터 일괄 수집) 수동 실행/이어하기 버튼 상태.
+  const [backfillingId, setBackfillingId] = useState<string | null>(null);
+  const [backfillResult, setBackfillResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
 
   async function runCollect(b: ReportBrand) {
     const now = new Date();
@@ -49,6 +52,27 @@ function BrandsContent() {
       setCollectResult({ id: b.id, ok: false, message: e instanceof Error ? e.message : "수집에 실패했습니다." });
     } finally {
       setCollectingId(null);
+    }
+  }
+
+  async function runBackfill(b: ReportBrand) {
+    setBackfillingId(b.id);
+    setBackfillResult(null);
+    try {
+      const result = await authedFetch(`/api/brands/${b.id}/backfill`, { method: "POST" });
+      setBackfillResult({
+        id: b.id,
+        ok: true,
+        message: result.done
+          ? "백필 완료 — 서비스 오픈일부터 전월까지 전부 반영됐습니다."
+          : `이번 실행에서 ${result.processedMonths.length}개월 처리함 — 아직 남아 있어 "백필 이어하기"를 다시 눌러주세요.`,
+      });
+      await load();
+    } catch (e) {
+      console.error("[BrandsPage] 백필 실패:", e);
+      setBackfillResult({ id: b.id, ok: false, message: e instanceof Error ? e.message : "백필에 실패했습니다." });
+    } finally {
+      setBackfillingId(null);
     }
   }
 
@@ -124,6 +148,7 @@ function BrandsContent() {
                   {b.backfill_status && b.backfill_status !== "COMPLETED" && (
                     <span className="badge bg-blue-100 text-blue-800">
                       백필 {b.backfill_status === "PENDING" ? "대기" : b.backfill_status === "IN_PROGRESS" ? "진행 중" : "실패"}
+                      {b.backfill_completed_through && ` (${b.backfill_completed_through}까지 완료)`}
                     </span>
                   )}
                 </div>
@@ -137,8 +162,26 @@ function BrandsContent() {
                     {collectResult.message}
                   </p>
                 )}
+                {backfillResult && backfillResult.id === b.id && (
+                  <p className={`mt-1 break-all text-xs ${backfillResult.ok ? "text-emerald-700" : "text-red-600"}`}>
+                    {backfillResult.message}
+                  </p>
+                )}
               </div>
               <div className="flex shrink-0 gap-2">
+                {b.has_saved_credentials && b.service_open_date && b.backfill_status && b.backfill_status !== "COMPLETED" && (
+                  <button
+                    className="btn btn-secondary text-xs"
+                    disabled={backfillingId === b.id}
+                    onClick={() => runBackfill(b)}
+                  >
+                    {backfillingId === b.id
+                      ? "백필 중..."
+                      : b.backfill_completed_through
+                        ? "백필 이어하기"
+                        : "백필 시작"}
+                  </button>
+                )}
                 {b.has_saved_credentials && (
                   <button
                     className="btn btn-secondary text-xs"
@@ -265,7 +308,15 @@ function BrandModal({
         fixed_verification_code: fixedVerificationCode.trim() || null,
       };
       if (isCreate) {
-        await authedFetch("/api/brands", { method: "POST", body: JSON.stringify(payload) });
+        const created = await authedFetch("/api/brands", { method: "POST", body: JSON.stringify(payload) });
+        if (payload.service_open_date && payload.cms_username && payload.cms_password) {
+          // 첫 백필 실행은 응답을 기다리지 않고 백그라운드로 던져둡니다(최대 60초까지 걸릴 수 있어
+          // 모달을 막지 않기 위함) — 실패하거나 다 못 끝내도 브랜드 관리 화면의 "백필 이어하기"
+          // 버튼으로 다시 실행할 수 있으므로 여기서는 실패를 사용자에게 보여주지 않습니다.
+          authedFetch(`/api/brands/${created.id}/backfill`, { method: "POST" }).catch((e) => {
+            console.error("[BrandModal] 백필 자동 실행 실패(브랜드 관리 화면에서 이어하기 가능):", e);
+          });
+        }
       } else {
         await authedFetch("/api/brands", { method: "PATCH", body: JSON.stringify({ id: brand.id, ...payload }) });
       }
