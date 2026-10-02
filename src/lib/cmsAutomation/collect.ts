@@ -90,8 +90,16 @@ function firstDayOfMonth(yearMonth: string): string {
 // 안에서 역산), export합니다 — 둘이 따로 노는 상수로 각자 관리되다 보니 이번에 30초로 올렸을 때
 // backfill.ts의 TIME_BUDGET_MS(45초, 고정값)는 안 고쳐서 또 504가 났습니다(로그인+2개월 완료 후
 // 3번째 달 시작 시점이 45초 budget 안이라 진행했는데, 그 달이 타임아웃 꽉 채우면서 60초 하드
-// 리밋을 넘겨버림). 같은 실수가 반복되지 않도록 이 상수 하나로 양쪽이 맞물리게 함.
-export const CMS_FETCH_TIMEOUT_MS = 30_000;
+// 리밋을 넘겨버림). 같은 실수가 반복되지 않도록 이 상수 하나로 양쪽이 맞물리게 함(동적 예산 계산,
+// 2026-10-02 backfill.ts 수정 참고).
+//
+// 2026-10-02 (동적 예산 계산 배포 후): 브래덴코 2025-11 정산 조회가 30초를 세 번 연속 초과 —
+// 우려했던 "원래 느린 CMS를 또 가린 건 아닌지"를 직접 fetch로 재현해 확인함(백엔드와 완전히 동일한
+// URL·파라미터로 브라우저에서 직접 요청 — 31.3초 소요, 거의 정확히 일치). 2025-08(996건)보다 2025-11
+// 주문량(1,555건)이 더 많아서 생기는 정상적인 지연으로 판단, 30→45초로 추가 상향. backfill.ts의
+// 중단 로직이 이 값에서 자동으로 역산되므로(HARD_LIMIT_MS - SAFETY_MARGIN_MS 기준) 이 상수만
+// 바꾸면 되고 TIME_BUDGET_MS류 상수를 따로 손볼 필요가 없음 — 바로 그 재발 방지가 지난 수정의 목적.
+export const CMS_FETCH_TIMEOUT_MS = 45_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
