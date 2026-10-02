@@ -1,8 +1,20 @@
 import { getAdminDb } from "@/lib/firebase/admin";
-import { decryptCmsPassword } from "@/lib/cmsCredentials";
+import { decryptCmsPassword, encryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "./login";
 import { collectMonthlyData, CMS_FETCH_TIMEOUT_MS } from "./collect";
+import { CmsAutomationError } from "./types";
 import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
+
+// 2026-10-02: 로그인 세션 재사용 — "백필 이어하기"를 누를 때마다 매번 새 서버 실행(invocation)이
+// 시작되고, 그때마다 헤드리스 브라우저로 처음부터 다시 로그인(3~6초)하다 보니 60초 서버리스 시간
+// 제한 안에서 느린 CMS 호출(2026-03 실측 47.4~48.2초)에 쓸 수 있는 여유가 거의 안 남는 문제가 있었음
+// (CMS_FETCH_TIMEOUT_MS를 54초로 올려봤다가 "로그인 오버헤드를 셈에 넣지 않아 시도조차 못 하고
+// 즉시 중단"되는 더 나쁜 결과를 보고 되돌린 사건 — collect.ts 상단 주석 참고). 로그인으로 얻은 쿠키를
+// brandCredentials에 암호화해 캐시해두고, 이 TTL 안이면 다음 실행이 로그인을 건너뛰고 바로 재사용합니다.
+// 정확한 CMS 세션 유효기간은 확인된 바 없어(길게는 수십 분 이상 유지되는 것을 관찰함) 보수적으로
+// 잡았고, 혹시 이보다 일찍 끊기더라도 getJson()이 401/403을 SESSION_EXPIRED로 구분해 던지므로 그
+// 자리에서 캐시를 비우고 다음 실행이 재로그인하도록 안전하게 넘어갑니다(아래 catch 블록 참고).
+const SESSION_CACHE_TTL_MS = 20 * 60 * 1000; // 20분
 
 // 그로스잇 브랜드 백필(backfill) — 서비스 오픈일부터 전월까지의 과거 데이터를 한 번에 가져와
 // brandMonthlyData에 반영합니다. 2026-10-01 확정 사항(화면 설계 질문지 7번) 그대로 구현했습니다:
@@ -87,21 +99,43 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
 
   await brandRef.update({ backfill_status: "IN_PROGRESS", updated_at: Date.now() });
 
-  // 로그인은 이번 배치에서 단 한 번만 — 이후 각 달의 데이터 수집은 이 쿠키로 일반 fetch만 반복합니다
-  // (login.ts 상단 주석 참고: 느린 건 헤드리스 브라우저 로그인 단계뿐, JSON API 호출 자체는 빠릅니다).
-  const session = await loginToCms({
-    cmsUrl: brand.cms_url,
-    username: creds.cms_username,
-    password: decryptCmsPassword(creds.cms_password_encrypted),
-    phoneVerificationRequired: brand.phone_verification_required,
-    fixedVerificationCode: creds.fixed_verification_code_encrypted
-      ? decryptCmsPassword(creds.fixed_verification_code_encrypted)
-      : null,
-  }).catch(async (e) => {
-    await brandRef.update({ backfill_status: "FAILED", updated_at: Date.now() });
-    throw e;
-  });
+  const credsRef = db.collection("brandCredentials").doc(brandId);
 
+  // 캐시된 세션이 있고 TTL 안이면 로그인을 건너뛰고 바로 재사용합니다 — 이번 실행은 거의 전부를
+  // 느린 CMS 호출에 쓸 수 있습니다(아래 for 루프의 시간 예산 체크가 startedAt 기준이라, 로그인을
+  // 건너뛴 만큼 그대로 여유로 남습니다).
+  const cachedCookie = creds.cms_session_cookie_encrypted;
+  const cachedAt = creds.cms_session_cached_at;
+  const hasValidCache = !!cachedCookie && !!cachedAt && Date.now() - cachedAt < SESSION_CACHE_TTL_MS;
+
+  if (!hasValidCache) {
+    // 캐시가 없거나 만료 — 이번 실행은 로그인만 하고 끝냅니다(어떤 달도 시도하지 않음). 로그인
+    // (3~6초)과 느린 CMS 호출(최악의 경우 CMS_FETCH_TIMEOUT_MS 꽉 채움)이 같은 실행에 몰리면 60초
+    // 하드 리밋에 바짝 붙는 상황이 재발하므로, 아예 한 실행씩 분리합니다 — "백필 이어하기"를
+    // 한 번 더 눌러야 할 수 있지만, 그만큼 타임아웃 설정을 안전하게 유지할 수 있습니다.
+    const session = await loginToCms({
+      cmsUrl: brand.cms_url,
+      username: creds.cms_username,
+      password: decryptCmsPassword(creds.cms_password_encrypted),
+      phoneVerificationRequired: brand.phone_verification_required,
+      fixedVerificationCode: creds.fixed_verification_code_encrypted
+        ? decryptCmsPassword(creds.fixed_verification_code_encrypted)
+        : null,
+    }).catch(async (e) => {
+      await brandRef.update({ backfill_status: "FAILED", updated_at: Date.now() });
+      throw e;
+    });
+
+    await credsRef.update({
+      cms_session_cookie_encrypted: encryptCmsPassword(session.cookieHeader),
+      cms_session_cached_at: Date.now(),
+    });
+    // 아직 어떤 달도 처리하지 않았으니 "대기" 상태로 남겨 "백필 이어하기"가 계속 보이게 합니다.
+    await brandRef.update({ backfill_status: "PENDING", updated_at: Date.now() });
+    return { done: false, processedMonths: [] };
+  }
+
+  const session = { cookieHeader: decryptCmsPassword(cachedCookie!) };
   const processed: string[] = [];
   for (const yearMonth of remaining) {
     // 지금 이 달을 시작했을 때 최악의 경우(= collect.ts 쪽 요청이 CMS_FETCH_TIMEOUT_MS를 꽉 채움)에도
@@ -135,6 +169,15 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
       await brandRef.update({ backfill_completed_through: yearMonth, updated_at: Date.now() });
       processed.push(yearMonth);
     } catch (e) {
+      if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") {
+        // 캐시해둔 세션이 실제로는 이미 무효했던 경우 — 데이터 수집 "실패"가 아니라 세션 문제이므로
+        // FAILED로 담당자를 놀라게 하지 않고, 캐시만 비운 뒤 "대기"로 남겨 다음 "백필 이어하기"가
+        // 자동으로 재로그인하도록 합니다.
+        console.warn(`[backfill] ${brandId} ${yearMonth} 캐시된 세션 만료 감지 — 캐시 비우고 재로그인 예정`, e);
+        await credsRef.update({ cms_session_cookie_encrypted: null, cms_session_cached_at: null });
+        await brandRef.update({ backfill_status: "PENDING", updated_at: Date.now() });
+        return { done: false, processedMonths: processed };
+      }
       // 한 달이 실패해도 그 이전까지는 이미 저장된 상태로 남겨두고, FAILED로 표시해 담당자가
       // 알아챌 수 있게 합니다 — "백필 이어하기"를 다시 누르면 실패한 달부터 재시도합니다.
       console.error(`[backfill] ${brandId} ${yearMonth} 수집 실패`, e);
