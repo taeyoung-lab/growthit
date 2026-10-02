@@ -33,14 +33,38 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// 2026-10-02: 브레댄코 화면 구조에 맞춰 로직을 고쳤는데도 여전히 정확히 60초에서
+// FUNCTION_INVOCATION_TIMEOUT으로 죽는 현상이 재현되어, 어느 단계에서 멈추는지 눈으로 볼 수 있도록
+// 단계별 console.log(Vercel 함수 로그에 그대로 찍힘)를 추가합니다. 원인 후보: (1) 네이티브
+// dialog(alert/confirm)가 떠서 페이지 JS 실행이 막히는 경우 — 아래 dialog 핸들러로 방어,
+// (2) browser.close()가 멈춘 렌더러를 기다리며 무한정 걸리는 경우 — 아래 withTimeout으로 방어.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[login] ${label} 단계가 ${ms}ms 안에 끝나지 않았습니다.`)), ms)
+    ),
+  ]);
+}
+
 export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
+  const t0 = Date.now();
+  const log = (step: string) => console.log(`[login] +${Date.now() - t0}ms ${step}`);
+
   const browser = await launchBrowser();
+  log("browser launched");
   try {
     const page = await browser.newPage();
+    page.on("dialog", (dialog) => {
+      log(`dialog appeared (type=${dialog.type()}, message=${dialog.message()}) — dismissing`);
+      dialog.dismiss().catch(() => {});
+    });
     await page.setViewport({ width: 1280, height: 900 });
 
     const loginUrl = new URL("/login", config.cmsUrl).toString();
+    log(`goto ${loginUrl} start`);
     await page.goto(loginUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    log("goto done");
 
     await page.waitForSelector(ID_INPUT_SELECTOR, { timeout: 15000 }).catch(() => {
       throw new CmsAutomationError(
@@ -53,11 +77,14 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     await page.type(ID_INPUT_SELECTOR, config.username, { delay: 20 });
     await page.click(PASSWORD_INPUT_SELECTOR);
     await page.type(PASSWORD_INPUT_SELECTOR, config.password, { delay: 20 });
+    log("id/password typed");
 
     // 전화번호 인증이 필요한 브랜드는 "Sign me in"을 누르기 전에 인증번호까지 먼저 채워야 합니다
     // (같은 화면에 이미 떠 있는 필드라 별도 화면 전환을 기다릴 필요가 없습니다 — 상단 주석 참고).
     if (config.phoneVerificationRequired) {
-      await requestAndFillPhoneVerification(page, config.fixedVerificationCode);
+      log("phone verification start");
+      await requestAndFillPhoneVerification(page, config.fixedVerificationCode, log);
+      log("phone verification done");
     }
 
     const [submitButton] = await page.$$(SUBMIT_BUTTON_XPATH);
@@ -65,10 +92,12 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
       throw new CmsAutomationError("로그인 버튼(Sign me in)을 찾지 못했습니다.", "LOGIN");
     }
 
+    log("submit click start");
     await Promise.all([
       page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(() => null),
       submitButton.click(),
     ]);
+    log("submit click / nav wait done");
 
     const currentUrl = page.url();
     if (currentUrl.includes("/login")) {
@@ -79,10 +108,15 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     }
 
     const cookies = await page.cookies();
+    log("cookies collected, returning");
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
     return { cookieHeader };
   } finally {
-    await browser.close();
+    log("closing browser");
+    await withTimeout(browser.close(), 5000, "browser.close()").catch((err) => {
+      log(`browser.close() did not finish cleanly: ${err}`);
+    });
+    log("browser close step finished");
   }
 }
 
@@ -91,7 +125,8 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
 // Number")에 고정 인증번호를 채워 넣기만 합니다 — 제출은 호출부에서 "Sign me in" 한 번으로 합니다.
 async function requestAndFillPhoneVerification(
   page: import("puppeteer-core").Page,
-  fixedCode: string | null
+  fixedCode: string | null,
+  log: (step: string) => void
 ): Promise<void> {
   if (!fixedCode) {
     throw new CmsAutomationError(
@@ -107,17 +142,22 @@ async function requestAndFillPhoneVerification(
       "PHONE_VERIFICATION"
     );
   }
+  log("clicking 인증번호발송");
   await sendCodeButton.click();
+  log("클릭 완료, 1.5초 대기");
   // 테스트 계정은 고정 인증번호라 실제 SMS 수신을 기다릴 필요가 없어 짧게만 대기합니다.
   await delay(1500);
 
+  log("waiting for code input selector");
   await page.waitForSelector(CODE_INPUT_SELECTOR, { timeout: 10000 }).catch(() => {
     throw new CmsAutomationError(
       "전화번호 인증번호 입력란을 찾지 못했습니다 — 실제 화면 구조 확인이 필요합니다(login.ts 참고).",
       "PHONE_VERIFICATION"
     );
   });
+  log("code input found, typing code");
   await page.click(CODE_INPUT_SELECTOR);
   await page.type(CODE_INPUT_SELECTOR, fixedCode, { delay: 20 });
+  log("code typed");
 }
 
