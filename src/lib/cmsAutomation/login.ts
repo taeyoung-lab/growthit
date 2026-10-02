@@ -18,8 +18,10 @@ import { CmsAutomationError, type CmsLoginConfig, type CmsSession } from "./type
 //      전화번호(마스킹 표시)와 "인증번호발송" 버튼이 "새로" 나타난다.
 //   2) "인증번호발송"을 누르면 네이티브 confirm 창("인증번호를 발송하시겠습니까?")이 뜬다 → 확인.
 //   3) 이어서 네이티브 alert 창("인증번호가 발송되었습니다.")이 뜬다 → 확인.
-//   4) 그제서야 인증번호 입력란(placeholder "Certification Number", 영문)이 나타난다 → 고정
-//      인증번호를 입력한다.
+//   4) 그제서야 인증번호 입력란이 나타난다 → 고정 인증번호를 입력한다. 이 입력란은 "Certification
+//      Number"라는 안내 라벨이 옆에 붙어 있을 뿐, placeholder 속성은 비어 있고 id="authNum"만
+//      있습니다(Chrome에서 input 속성을 직접 읽어 확인) — 이전 버전이 placeholder로 이 입력란을
+//      찾으려다 매번 실패했던 이유입니다.
 //   5) "Sign me in"을 다시 한번 눌러야 최종 로그인이 완료된다(같은 버튼, 두 번째 제출).
 // 즉 "Sign me in"은 총 두 번 눌러야 하고, 중간에 뜨는 네이티브 confirm/alert 창을 자동으로 처리하는
 // dialog 핸들러가 꼭 필요합니다(없으면 Puppeteer가 창이 뜬 채로 멈춰서 60초 플랫폼 타임아웃까지
@@ -31,7 +33,12 @@ const PASSWORD_INPUT_SELECTOR = 'input[placeholder="Password"][type="password"]'
 // 씁니다 (https://pptr.dev/guides/page-interactions#xpath-selectors--p-xpath).
 const SUBMIT_BUTTON_XPATH = "xpath/.//button[@type='submit' and contains(., 'Sign me in')]";
 const SEND_CODE_BUTTON_XPATH = "xpath/.//button[contains(., '인증번호발송')]";
-const CODE_INPUT_SELECTOR = 'input[placeholder="Certification Number"]';
+// 2026-10-02: "Certification Number"는 입력란의 placeholder가 아니라 옆에 붙은 안내 라벨 텍스트였을
+// 뿐이었습니다 — 실제 input 엘리먼트는 placeholder가 비어 있고 id="authNum"만 있습니다(Chrome에서
+// 직접 input 속성을 읽어 확인: outerHTML에 placeholder 속성 자체가 없음). placeholder 기반 셀렉터가
+// 매번 아무것도 못 찾았던 이유였고, 그래서 waitForSelector가 실제로 존재하는 입력란을 두고도 매번
+// 타임아웃났던 것입니다. id 기준으로 바꿉니다.
+const CODE_INPUT_SELECTOR = "#authNum";
 
 // browser.close()가 멈춘 렌더러를 기다리며 무한정 걸리는 경우를 대비한 안전장치.
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
