@@ -163,8 +163,16 @@ async function requestAndFillPhoneVerification(
   log("clicking 인증번호발송 (뒤따르는 confirm/alert 창은 자동 처리됨)");
   await sendCodeButton.click();
 
-  log("waiting for Certification Number input to appear");
-  await page.waitForSelector(CODE_INPUT_SELECTOR, { timeout: 15000 }).catch(() => {
+  // 2026-10-02: 실제 운영에서는 confirm/alert 두 창 모두 정상적으로 자동 처리되는 것까지 로그로
+  // 확인했는데도, 그 다음 인증번호 입력란이 15초 안에 나타나지 않는 현상이 재현됨. SMS 발송이
+  // 실제로는 더 오래 걸릴 가능성을 열어두고 대기 시간을 늘렸고, 그래도 실패하면 그 순간 페이지에
+  // 실제로 뭐가 떠 있는지(에러 메시지 등) 로그로 남겨서 다음 번엔 추측 없이 바로 알 수 있게 합니다.
+  log("waiting for Certification Number input to appear (최대 35초)");
+  await page.waitForSelector(CODE_INPUT_SELECTOR, { timeout: 35000 }).catch(async () => {
+    const bodyText = await page
+      .evaluate(() => document.body.innerText.replace(/\s+/g, " ").trim().slice(0, 1000))
+      .catch((err) => `(페이지 상태 읽기 실패: ${err})`);
+    log(`code input 대기 실패 시점의 화면 텍스트: ${bodyText}`);
     throw new CmsAutomationError(
       "전화번호 인증번호 입력란이 나타나지 않았습니다 — 실제 화면 구조 확인이 필요합니다(login.ts 참고).",
       "PHONE_VERIFICATION"
