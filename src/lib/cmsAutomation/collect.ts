@@ -151,6 +151,14 @@ async function getJson(cmsUrl: string, path: string, cookieHeader: string): Prom
     // 던집니다(브랜드 FAILED 처리 대신 캐시만 비우고 다음 실행에서 재로그인하도록 유도하기 위함).
     throw new CmsAutomationError(`CMS 세션이 만료됐거나 무효합니다 (${res.status}) — ${url}`, "SESSION_EXPIRED");
   }
+  if (res.status === 504) {
+    // 2026-10-02: 브래덴코 2026-06 정산 조회가 CMS_FETCH_TIMEOUT_MS(110초)와 무관하게 매번 정확히
+    // 60초에 504로 끊기는 것을 직접 재현까지 포함해 3회 연속 확인 — CMS 서버/인프라 자체의
+    // 게이트웨이 타임아웃이라, 저희 쪽 요청 타임아웃을 아무리 올려도 해결되지 않습니다(담당자 확인
+    // 완료). backfill.ts가 이 경우만 구분해서 그 달을 건너뛰고 다음 달로 넘어가도록 별도 종류의
+    // 에러로 던집니다(types.ts의 CmsAutomationError 주석 참고).
+    throw new CmsAutomationError(`CMS 서버 게이트웨이 타임아웃 (504) — ${url}`, "GATEWAY_TIMEOUT");
+  }
   if (!res.ok) {
     throw new Error(`CMS API 호출 실패 (${res.status}) — ${url}`);
   }
