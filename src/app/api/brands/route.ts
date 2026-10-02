@@ -96,6 +96,9 @@ export async function POST(req: NextRequest) {
         fixed_verification_code_encrypted: body.fixed_verification_code?.trim()
           ? encryptCmsPassword(body.fixed_verification_code.trim())
           : null,
+        // 신규 등록 시점엔 아직 로그인해본 적이 없으니 캐시된 세션도 없습니다.
+        cms_session_cookie_encrypted: null,
+        cms_session_cached_at: null,
         updated_by: uid,
         updated_at: now,
       };
@@ -169,6 +172,10 @@ export async function PATCH(req: NextRequest) {
         cms_username: body.cms_username!.trim(),
         cms_password_encrypted: encryptCmsPassword(body.cms_password!),
         fixed_verification_code_encrypted: fixedVerificationCodeEncrypted,
+        // 계정 정보가 바뀌는 경우(아이디/비밀번호 수정)이므로, 혹시 남아있던 캐시된 세션은
+        // 무효화합니다 — 다음 백필 실행이 새 계정 정보로 다시 로그인하도록.
+        cms_session_cookie_encrypted: null,
+        cms_session_cached_at: null,
         updated_by: uid,
         updated_at: now,
       };
