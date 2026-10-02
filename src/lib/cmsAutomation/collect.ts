@@ -213,6 +213,28 @@ async function getSettlements(
   return getJson(cmsUrl, `/api/settlements/sales?${query}`, cookieHeader);
 }
 
+// 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증 — 처갓집/샐러리아는
+// 아직 동일 경로에 이 엔드포인트가 있는지 라이브 확인 전). perPage=500으로 브랜드의 전체 매장을
+// 한 번에 받아옵니다(브래덴코 91개 매장 기준 정상 동작 확인). storeSt(매장 상태 코드)는
+// /api/code/sub/350에서 조회 가능 — 350001=정상, 350002=휴점, 350003=폐업, 350004=개점전이며,
+// 기획 문서의 "미도입 매장" 판별 기준(displayYn===0 && storeSt==="350004")과 정확히 일치함을
+// 확인했습니다.
+async function getStoreManage(cmsUrl: string, cookieHeader: string): Promise<unknown> {
+  const query =
+    "page=1&perPage=500&type=storeNm&keyword=&region=&storeState=&stampYn=&displayYn=&isStoreAdmin=false&storeId=";
+  return getJson(cmsUrl, `/api/storeManage?${query}`, cookieHeader);
+}
+
+// 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증). 이 엔드포인트는
+// targetGroupStats와 달리 월 집계가 아니라 date 파라미터 하루치 스냅샷만 반환하므로(일별 로우
+// 목록이 아니라 그 날짜 기준 전체 회원 분포), 기존 targetGroupStats가 endDt(월말)를 쓰는 것과
+// 같은 방식으로 월말 스냅샷을 그 달의 대표값으로 사용합니다. perPage=50은 성별(2)×연령대 조합이
+// 브랜드별로 달라도 넉넉히 전부 커버하기 위한 값(브래덴코 기준 응답 행 수 대비 여유 있게 설정).
+async function getMemberStats(cmsUrl: string, cookieHeader: string, endDt: string): Promise<unknown> {
+  const query = `page=1&perPage=50&date=${endDt}`;
+  return getJson(cmsUrl, `/api/stats/member?${query}`, cookieHeader);
+}
+
 export async function collectMonthlyData(
   cmsUrl: string,
   session: CmsSession,
@@ -231,5 +253,27 @@ export async function collectMonthlyData(
     getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
   ]);
 
-  return { yearMonth, dashboard, settlementsSales, targetGroupStats, collectedAt: Date.now() };
+  // 2026-10-02: storeManage/memberStats는 아직 표준형(브래덴코)에서만 라이브 검증된 신규
+  // 엔드포인트라, 처갓집(분리형 dashboard)·샐러리아(dateRange 정산) 같은 변형 브랜드에도 같은
+  // 경로가 존재하는지 확인 전입니다. 위 3개(dashboard/settlementsSales/targetGroupStats)와 같은
+  // Promise.all에 넣으면 이 두 엔드포인트가 없는 브랜드는 기존에 멀쩡히 되던 수집까지 전부
+  // 실패하게 되므로, 별도의 Promise.allSettled로 분리해 실패해도 null + 경고 로그만 남기고
+  // 나머지 수집은 그대로 성공하도록 처리합니다. 변형 브랜드에서도 라이브 검증이 끝나면
+  // Promise.all로 통합할 수 있습니다.
+  const [storeManageResult, memberStatsResult] = await Promise.allSettled([
+    getStoreManage(cmsUrl, cookieHeader),
+    getMemberStats(cmsUrl, cookieHeader, endDt),
+  ]);
+
+  if (storeManageResult.status === "rejected") {
+    console.warn(`[collectMonthlyData] storeManage 수집 실패(${cmsUrl}, ${yearMonth}):`, storeManageResult.reason);
+  }
+  if (memberStatsResult.status === "rejected") {
+    console.warn(`[collectMonthlyData] memberStats 수집 실패(${cmsUrl}, ${yearMonth}):`, memberStatsResult.reason);
+  }
+
+  const storeManage = storeManageResult.status === "fulfilled" ? storeManageResult.value : null;
+  const memberStats = memberStatsResult.status === "fulfilled" ? memberStatsResult.value : null;
+
+  return { yearMonth, dashboard, settlementsSales, targetGroupStats, storeManage, memberStats, collectedAt: Date.now() };
 }
