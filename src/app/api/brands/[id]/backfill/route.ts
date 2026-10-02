@@ -14,7 +14,15 @@ import type { ReportBrand } from "@/lib/types";
 // PENDING으로 남습니다 — 브랜드 관리 화면의 "백필 이어하기" 버튼으로 이 엔드포인트를 몇 번이고
 // 다시 호출할 수 있고, 이미 완료된 달은 건너뛰므로(backfill_completed_through 기준) 중복
 // 수집되지 않습니다.
-export const maxDuration = 60;
+//
+// 2026-10-02: 60초를 "Vercel 플랫폼 자체 한도"로 잘못 가정하고 그 안에서 CMS_FETCH_TIMEOUT_MS를
+// 1~수 초 단위로 쥐어짜 왔었음(collect.ts·backfill.ts 상단 주석의 반복된 상향/롤백 이력 참고).
+// 실제로는 Vercel 공식 문서(Functions > Configuring Functions > Duration) 확인 결과 Hobby
+// 플랜도 Fluid Compute 기준 maxDuration을 기본/최대 300초(5분)까지 지원 — 60초는 이 프로젝트가
+// 초반에 넣어둔 자체 값일 뿐 플랫폼 제약이 아니었음. 브래덴코 2026-04 정산 조회가 54초 타임아웃도
+// 일관되게 초과(직접 재현 측정 56.1초, HTTP 200 정상 응답 — 단지 느릴 뿐)하는 것을 계기로 120초로
+// 상향(담당자 확인 완료) — 지금까지 관측된 월별 CMS 응답시간(45~56초)대비 넉넉한 여유를 둠.
+export const maxDuration = 120;
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
