@@ -147,6 +147,15 @@ export interface BrandCredentials {
   // 항상 동일한 고정 인증번호를 쓰는 구조라, cms_password와 동일한 방식(AES-256-GCM)으로
   // 암호화해 저장합니다. phone_verification_required=false인 브랜드는 null.
   fixed_verification_code_encrypted: string | null;
+  // 2026-10-02: 백필이 "백필 이어하기" 클릭마다 매번 새 서버 실행(invocation)으로 로그인을 처음부터
+  // 다시 하다 보니(헤드리스 브라우저 로그인 3~6초) 60초 서버리스 시간 제한 안에서 느린 CMS 호출에
+  // 쓸 수 있는 여유가 너무 빠듯해지는 문제가 있었습니다(2026-03 백필 조사 참고). 로그인으로 얻은
+  // 세션 쿠키를 여기 암호화해 저장해두고, 일정 시간(backfill.ts의 SESSION_CACHE_TTL_MS) 안이면
+  // 다음 실행에서 로그인을 건너뛰고 바로 재사용합니다 — cms_password_encrypted와 동일한 방식
+  // (AES-256-GCM)으로 암호화하고, 저장 위치도 이미 클라이언트 접근이 전면 차단된 이 컬렉션을
+  // 그대로 씁니다. 캐시된 세션이 없거나 만료됐으면 null.
+  cms_session_cookie_encrypted: string | null;
+  cms_session_cached_at: number | null;
   updated_by: ID;
   updated_at: number;
 }
