@@ -1,3 +1,4 @@
+import { CmsAutomationError } from "./types";
 import type { CmsCollectionResult, CmsSession } from "./types";
 
 // 로그인 이후 데이터 수집 — 화면을 다시 띄우지 않고, 로그인으로 얻은 쿠키를 그대로 실어 CMS가
@@ -100,17 +101,17 @@ function firstDayOfMonth(yearMonth: string): string {
 // 중단 로직이 이 값에서 자동으로 역산되므로(HARD_LIMIT_MS - SAFETY_MARGIN_MS 기준) 이 상수만
 // 바꾸면 되고 TIME_BUDGET_MS류 상수를 따로 손볼 필요가 없음 — 바로 그 재발 방지가 지난 수정의 목적.
 //
-// 2026-10-02 (같은 날, 추가 상향): 이번엔 2026-03이 45초에서도 4번 연속 동일하게 실패(실행시간
-// 48.17~48.20초, 개선 추세 없음) — 2025-11과 달리 "가끔 느린" 게 아니라 "이 달은 구조적으로
-// 45초보다 오래 걸린다"는 신호라서 재시도로는 해결이 안 됨. 브래덴코 CMS에 직접 로그인해 동일
-// 요청을 재현한 결과 47.4초(HTTP 200, 정상 응답 — 에러 아님, 느릴 뿐) 확인. 45→54초로 상향.
-// 주의: HARD_LIMIT_MS(60초) - SAFETY_MARGIN_MS(5초) = 55초가 이 값이 넘지 말아야 할 구조적
-// 상한선 — backfill.ts의 중단 로직이 "이번 달을 시작해도 안전한가"를 CMS_FETCH_TIMEOUT_MS 기준
-// 최악의 경우로 역산하기 때문에, 이 값이 55초 이상이 되면 단 한 달도 시작하지 못하고 매번 즉시
-// 중단돼버림(2026-03뿐 아니라 전체 백필이 멈춤). 54초는 그 바로 아래 선이자, 실측 47.4초 대비
-// 약 6.6초 여유를 남긴 값. 이후에도 더 느린 달이 나오면 이 상수 하나만 다시 올리면 되지만, 55초
-// 근처에서는 더 이상 여유가 없으므로 그때는 maxDuration(route.ts) 자체를 늘리는 구조적 변경이
-// 필요함.
+// 2026-10-02 (같은 날, 추가 상향 시도 — 한 차례 되돌렸다가 구조 개선 후 재상향): 2026-03이 45초에서도
+// 4번 연속 동일하게 실패(실행시간 48.17~48.20초, 개선 추세 없음) — 2025-11과 달리 "가끔 느린" 게
+// 아니라 "이 달은 구조적으로 45초보다 오래 걸린다"는 신호. 브래덴코 CMS에 직접 로그인해 재현한 결과
+// 47.4초(HTTP 200, 정상 응답) 확인. 처음엔 이 값만 54초로 올렸다가, 매 실행마다 새로 로그인하는
+// 오버헤드(3~6초)가 backfill.ts의 시간 예산 체크에 그대로 들어가 "시도조차 못 하고 즉시 중단"되는
+// 더 나쁜 결과를 보고 일단 45초로 되돌렸었음. 이후 backfill.ts에 로그인 세션 재사용을 도입해(캐시된
+// 쿠키가 유효하면 재로그인 없이 바로 CMS 호출) 이 문제의 근본 원인(로그인 오버헤드가 예산을 깎아먹는
+// 것)을 해결했으므로, 캐시 재사용 경로에서는 이 값을 안전하게 다시 올릴 수 있음 — 45→54초로 재상향.
+// (캐시가 없거나 만료된 실행은 로그인만 하고 끝내고 이 값을 아예 쓰지 않으므로 영향 없음 — backfill.ts
+// 상단 주석 참고.) 54초는 여전히 HARD_LIMIT_MS(60초)-SAFETY_MARGIN_MS(5초)=55초 바로 아래 선이자,
+// 2026-03 실측 47.4~48.2초 대비 약 6~7초 여유를 남긴 값.
 export const CMS_FETCH_TIMEOUT_MS = 54_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
@@ -130,6 +131,12 @@ async function getJson(cmsUrl: string, path: string, cookieHeader: string): Prom
     throw err;
   } finally {
     clearTimeout(timeout);
+  }
+  if (res.status === 401 || res.status === 403) {
+    // 2026-10-02: 로그인 세션 재사용 도입 — 캐시해둔 쿠키가 이미 만료됐을 때 backfill.ts가 "데이터
+    // 수집 실패"가 아니라 "세션이 끊겼다"로 구분해서 처리할 수 있도록, 이 경우만 별도 종류의 에러로
+    // 던집니다(브랜드 FAILED 처리 대신 캐시만 비우고 다음 실행에서 재로그인하도록 유도하기 위함).
+    throw new CmsAutomationError(`CMS 세션이 만료됐거나 무효합니다 (${res.status}) — ${url}`, "SESSION_EXPIRED");
   }
   if (!res.ok) {
     throw new Error(`CMS API 호출 실패 (${res.status}) — ${url}`);
