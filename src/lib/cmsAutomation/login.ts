@@ -10,16 +10,20 @@ import { CmsAutomationError, type CmsLoginConfig, type CmsSession } from "./type
 // 공통으로 쓰되, 실제 연동 시 브랜드별로 한 번씩은 라이브 확인이 필요합니다(로그인 화면 문구나
 // 구조가 브랜드별로 약간 다를 가능성을 배제할 수 없음).
 //
-// 2026-10-02: 브레댄코(테스트_브래덴코) 테스트계정(test0101)으로 Chrome에서 직접 로그인해 전화번호
-// 인증 화면 구조를 확인했습니다. 이전 버전은 "Sign me in"을 먼저 눌러 로그인을 마친 뒤 별도의 인증
-// 화면이 뜬다고 가정했는데, 실제로는 그런 화면 전환이 전혀 없습니다 — 전화번호(마스킹 표시) /
-// "인증번호발송" 버튼 / 인증번호 입력란(placeholder "Certification Number", 한글 "인증"이 아니라
-// 영문 placeholder)이 아이디·비밀번호 입력란과 함께 로그인 폼 한 화면에 처음부터 같이 떠 있고,
-// 모든 값을 다 채운 뒤 "Sign me in" 한 번으로 제출합니다. 이전 코드는 (1) 아이디/비밀번호만 채운 채
-// 제출 버튼을 먼저 눌러 미완성 폼을 제출하고 (2) 존재하지 않는 "인증 화면 전환"을 기다리고
-// (3) 인증번호 입력란을 한글 "인증" 포함 placeholder로 찾아 매번 못 찾고 있었습니다 — 이 세 가지가
-// 겹쳐 60초 플랫폼 타임아웃까지 소진했던 것으로 보입니다. 아래 코드는 실제 화면 구조에 맞춰 전화번호
-// 인증이 필요하면 "Sign me in"을 누르기 전에 인증번호까지 먼저 채워 넣도록 순서를 바로잡았습니다.
+// 2026-10-02: 브레댄코(테스트_브래덴코) 테스트계정(test0101)으로 Chrome에서 실제 로그인 전 과정을
+// 화면 캡처로 확인해, 전화번호 인증 흐름을 다시 바로잡았습니다. 이전 두 버전은 모두 틀린 가정이었고
+// (버전1: "Sign me in"을 먼저 눌러야 인증 화면이 뜬다 / 버전2: 인증 필드가 로그인 폼에 처음부터 같이
+// 떠 있다), 실제 흐름은 이렇습니다:
+//   1) 아이디·비밀번호만 입력하고 "Sign me in"을 누른다 — 화면 전환(URL 이동) 없이, 같은 화면에
+//      전화번호(마스킹 표시)와 "인증번호발송" 버튼이 "새로" 나타난다.
+//   2) "인증번호발송"을 누르면 네이티브 confirm 창("인증번호를 발송하시겠습니까?")이 뜬다 → 확인.
+//   3) 이어서 네이티브 alert 창("인증번호가 발송되었습니다.")이 뜬다 → 확인.
+//   4) 그제서야 인증번호 입력란(placeholder "Certification Number", 영문)이 나타난다 → 고정
+//      인증번호를 입력한다.
+//   5) "Sign me in"을 다시 한번 눌러야 최종 로그인이 완료된다(같은 버튼, 두 번째 제출).
+// 즉 "Sign me in"은 총 두 번 눌러야 하고, 중간에 뜨는 네이티브 confirm/alert 창을 자동으로 처리하는
+// dialog 핸들러가 꼭 필요합니다(없으면 Puppeteer가 창이 뜬 채로 멈춰서 60초 플랫폼 타임아웃까지
+// 간다고 추정됨). 이 버전은 이 다섯 단계를 그대로 코드로 옮긴 것입니다.
 
 const ID_INPUT_SELECTOR = 'input[placeholder="Id"]';
 const PASSWORD_INPUT_SELECTOR = 'input[placeholder="Password"][type="password"]';
@@ -29,15 +33,7 @@ const SUBMIT_BUTTON_XPATH = "xpath/.//button[@type='submit' and contains(., 'Sig
 const SEND_CODE_BUTTON_XPATH = "xpath/.//button[contains(., '인증번호발송')]";
 const CODE_INPUT_SELECTOR = 'input[placeholder="Certification Number"]';
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// 2026-10-02: 브레댄코 화면 구조에 맞춰 로직을 고쳤는데도 여전히 정확히 60초에서
-// FUNCTION_INVOCATION_TIMEOUT으로 죽는 현상이 재현되어, 어느 단계에서 멈추는지 눈으로 볼 수 있도록
-// 단계별 console.log(Vercel 함수 로그에 그대로 찍힘)를 추가합니다. 원인 후보: (1) 네이티브
-// dialog(alert/confirm)가 떠서 페이지 JS 실행이 막히는 경우 — 아래 dialog 핸들러로 방어,
-// (2) browser.close()가 멈춘 렌더러를 기다리며 무한정 걸리는 경우 — 아래 withTimeout으로 방어.
+// browser.close()가 멈춘 렌더러를 기다리며 무한정 걸리는 경우를 대비한 안전장치.
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     promise,
@@ -55,9 +51,12 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
   log("browser launched");
   try {
     const page = await browser.newPage();
+    // 브레댄코 등 전화번호 인증 브랜드는 "인증번호발송" 클릭 시 네이티브 confirm → alert 창이 순서대로
+    // 뜹니다. 핸들러 없이는 Puppeteer가 응답을 못 받아 멈추므로, 모든 다이얼로그를 "확인"(accept)
+    // 처리합니다 — confirm은 발송 진행, alert는 단순 확인 닫기라 accept 하나로 둘 다 충분합니다.
     page.on("dialog", (dialog) => {
-      log(`dialog appeared (type=${dialog.type()}, message=${dialog.message()}) — dismissing`);
-      dialog.dismiss().catch(() => {});
+      log(`dialog appeared (type=${dialog.type()}, message=${dialog.message()}) — accepting`);
+      dialog.accept().catch(() => {});
     });
     await page.setViewport({ width: 1280, height: 900 });
 
@@ -79,30 +78,28 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     await page.type(PASSWORD_INPUT_SELECTOR, config.password, { delay: 20 });
     log("id/password typed");
 
-    // 전화번호 인증이 필요한 브랜드는 "Sign me in"을 누르기 전에 인증번호까지 먼저 채워야 합니다
-    // (같은 화면에 이미 떠 있는 필드라 별도 화면 전환을 기다릴 필요가 없습니다 — 상단 주석 참고).
+    // 1차 제출: 아이디·비밀번호만으로 누른다. 전화번호 인증이 필요한 브랜드는 이 제출로 화면 이동 없이
+    // "인증번호발송" 버튼이 새로 나타나고, 아닌 브랜드는 이 제출 자체가 곧 로그인 완료(실제 네비게이션)
+    // 이다. 어느 쪽인지 미리 알 수 없으므로 "네비게이션 발생" 또는 "인증번호발송 버튼 등장" 중 먼저
+    // 일어나는 쪽을 기다려 불필요한 대기를 줄인다.
+    await clickSubmit(page, log, {
+      alsoRaceWith: config.phoneVerificationRequired
+        ? page.waitForSelector(SEND_CODE_BUTTON_XPATH, { timeout: 20000 })
+        : null,
+    });
+
     if (config.phoneVerificationRequired) {
       log("phone verification start");
       await requestAndFillPhoneVerification(page, config.fixedVerificationCode, log);
-      log("phone verification done");
+      log("phone verification done, submitting again to complete login");
+      // 2차 제출: 인증번호까지 채운 뒤 같은 버튼을 다시 눌러야 실제 로그인이 완료된다(실제 네비게이션).
+      await clickSubmit(page, log, { alsoRaceWith: null });
     }
-
-    const [submitButton] = await page.$$(SUBMIT_BUTTON_XPATH);
-    if (!submitButton) {
-      throw new CmsAutomationError("로그인 버튼(Sign me in)을 찾지 못했습니다.", "LOGIN");
-    }
-
-    log("submit click start");
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(() => null),
-      submitButton.click(),
-    ]);
-    log("submit click / nav wait done");
 
     const currentUrl = page.url();
     if (currentUrl.includes("/login")) {
       throw new CmsAutomationError(
-        "로그인에 실패했습니다(로그인 화면에 그대로 머물러 있음) — 저장된 CMS 계정 정보를 확인해주세요.",
+        "로그인에 실패했습니다(로그인 화면에 그대로 머물러 있음) — 저장된 CMS 계정 정보 또는 고정 인증번호를 확인해주세요.",
         "LOGIN"
       );
     }
@@ -120,9 +117,29 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
   }
 }
 
-// 2026-10-02 브레댄코 실제 화면으로 검증한 분기(상단 주석 참고). 로그인 폼과 같은 화면에서
-// "인증번호발송" 버튼을 눌러 인증번호를 전송한 뒤, 인증번호 입력란(placeholder "Certification
-// Number")에 고정 인증번호를 채워 넣기만 합니다 — 제출은 호출부에서 "Sign me in" 한 번으로 합니다.
+async function clickSubmit(
+  page: import("puppeteer-core").Page,
+  log: (step: string) => void,
+  options: { alsoRaceWith: ReturnType<import("puppeteer-core").Page["waitForSelector"]> | null }
+): Promise<void> {
+  const [submitButton] = await page.$$(SUBMIT_BUTTON_XPATH);
+  if (!submitButton) {
+    throw new CmsAutomationError("로그인 버튼(Sign me in)을 찾지 못했습니다.", "LOGIN");
+  }
+
+  log("submit click start");
+  const waiters = [page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })];
+  if (options.alsoRaceWith) {
+    waiters.push(options.alsoRaceWith as ReturnType<typeof page.waitForNavigation>);
+  }
+
+  await Promise.all([Promise.race(waiters).catch(() => null), submitButton.click()]);
+  log("submit click / wait done");
+}
+
+// 2026-10-02 브레댄코 실제 화면으로 검증한 분기(상단 주석 참고). 이 시점에는 이미 1차 제출로
+// "인증번호발송" 버튼이 화면에 나타나 있어야 한다(호출부에서 보장). 버튼을 누르면 뜨는 네이티브
+// confirm/alert 창은 상단에서 등록한 공용 dialog 핸들러가 자동으로 처리한다.
 async function requestAndFillPhoneVerification(
   page: import("puppeteer-core").Page,
   fixedCode: string | null,
@@ -138,20 +155,18 @@ async function requestAndFillPhoneVerification(
   const [sendCodeButton] = await page.$$(SEND_CODE_BUTTON_XPATH);
   if (!sendCodeButton) {
     throw new CmsAutomationError(
-      "인증번호발송 버튼을 찾지 못했습니다 — 실제 화면 구조 확인이 필요합니다(login.ts 참고).",
+      "1차 제출(아이디/비밀번호) 후에도 인증번호발송 버튼이 나타나지 않았습니다 — 저장된 계정 정보 또는 화면 구조를 확인해주세요.",
       "PHONE_VERIFICATION"
     );
   }
-  log("clicking 인증번호발송");
-  await sendCodeButton.click();
-  log("클릭 완료, 1.5초 대기");
-  // 테스트 계정은 고정 인증번호라 실제 SMS 수신을 기다릴 필요가 없어 짧게만 대기합니다.
-  await delay(1500);
 
-  log("waiting for code input selector");
-  await page.waitForSelector(CODE_INPUT_SELECTOR, { timeout: 10000 }).catch(() => {
+  log("clicking 인증번호발송 (뒤따르는 confirm/alert 창은 자동 처리됨)");
+  await sendCodeButton.click();
+
+  log("waiting for Certification Number input to appear");
+  await page.waitForSelector(CODE_INPUT_SELECTOR, { timeout: 15000 }).catch(() => {
     throw new CmsAutomationError(
-      "전화번호 인증번호 입력란을 찾지 못했습니다 — 실제 화면 구조 확인이 필요합니다(login.ts 참고).",
+      "전화번호 인증번호 입력란이 나타나지 않았습니다 — 실제 화면 구조 확인이 필요합니다(login.ts 참고).",
       "PHONE_VERIFICATION"
     );
   });
@@ -160,4 +175,3 @@ async function requestAndFillPhoneVerification(
   await page.type(CODE_INPUT_SELECTOR, fixedCode, { delay: 20 });
   log("code typed");
 }
-
