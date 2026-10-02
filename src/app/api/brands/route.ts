@@ -149,7 +149,13 @@ export async function PATCH(req: NextRequest) {
     if (wantsCredentialChange) updates.has_saved_credentials = true;
     // 서비스 오픈일을 기존에 없다가 이번에 처음 입력한 경우에만 백필 대상으로 새로 표시합니다
     // (이미 백필이 끝났거나 진행 중인 브랜드를 수정 한 번으로 재대상화하지 않도록).
-    if (!existing.service_open_date && body.service_open_date?.trim()) {
+    //
+    // 2026-10-02: 여기에 더해 existing.backfill_status가 비어 있는 경우도 함께 구제합니다 —
+    // backfill_status 필드가 생기기 전(2026-10-01 이전)에 만들어진 브랜드는 서비스 오픈일이 이미
+    // 있었더라도 backfill_status가 한 번도 세팅되지 않아(null), 브랜드 관리 화면에 백필 버튼 자체가
+    // 안 뜨는 문제가 있었습니다(영커피에서 확인). 그런 레거시 브랜드도 "수정 → 저장" 한 번이면
+    // 자동으로 복구되도록 조건을 넓혔습니다.
+    if (!existing.backfill_status && body.service_open_date?.trim()) {
       updates.backfill_status = "PENDING";
     }
 
