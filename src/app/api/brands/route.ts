@@ -80,6 +80,7 @@ export async function POST(req: NextRequest) {
       // 서비스 오픈일을 입력한 경우에만 백필 대상 — 실제 실행 로직은 아직 미구현이라 상태만 PENDING으로 표시.
       backfill_status: body.service_open_date?.trim() ? "PENDING" : null,
       backfill_completed_through: null,
+      backfill_skipped_months: [],
       last_published_month: null,
       brand_status: "ACTIVE",
       created_at: now,
