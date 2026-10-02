@@ -247,23 +247,30 @@ export async function collectMonthlyData(
 
   const targetGroupQuery = `page=1&perPage=31&endDt=${endDt}`;
 
-  const [dashboard, settlementsSales, targetGroupStats] = await Promise.all([
-    getDashboard(variant.dashboard, cmsUrl, cookieHeader, yearMonth, endDt),
-    getSettlements(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
-    getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
-  ]);
+  // 2026-10-02 (첫 배포 직후 발견·수정): storeManage/memberStats를 처음엔 위 3개 호출이 모두 끝난
+  // "다음 단계"로 await해서 순차 실행했다가, 브래덴코 실수집 테스트에서 /api/brands/{id}/collect
+  // 라우트가 504로 실패하는 걸 바로 확인했습니다 — 이 라우트의 maxDuration은 60초인데, 브래덴코
+  // 정산 조회 자체가 이미 45~56초대(collect.ts 상단 CMS_FETCH_TIMEOUT_MS 연혁 주석 참고)라,
+  // 거기에 신규 호출 2개를 "순서대로 추가 대기"시키면 총 소요시간이 60초를 넘겨버리는 구조였습니다.
+  // 그래서 5개 호출을 전부 하나의 Promise.allSettled로 묶어 동시에 쏘도록 바꿨습니다 — 전체
+  // 소요시간은 (순차 합이 아니라) 가장 느린 호출 1개 기준으로 돌아오므로, 기존 3개짜리 Promise.all과
+  // 사실상 같은 총 소요시간을 유지합니다. 다만 dashboard/settlementsSales/targetGroupStats 3개는
+  // 기존과 동일하게 "실패하면 전체 실패"(reject를 그대로 throw)로 유지하고, storeManage/memberStats
+  // 2개만 실패를 허용(null + 경고 로그)합니다 — 처갓집(분리형 dashboard)·샐러리아(dateRange 정산)
+  // 등 아직 이 두 엔드포인트가 라이브 검증되지 않은 변형 브랜드에서 404/500이 나더라도 기존
+  // 3개 데이터 수집 자체는 그대로 성공하도록 하기 위함입니다.
+  const [dashboardResult, settlementsResult, targetGroupResult, storeManageResult, memberStatsResult] =
+    await Promise.allSettled([
+      getDashboard(variant.dashboard, cmsUrl, cookieHeader, yearMonth, endDt),
+      getSettlements(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
+      getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
+      getStoreManage(cmsUrl, cookieHeader),
+      getMemberStats(cmsUrl, cookieHeader, endDt),
+    ]);
 
-  // 2026-10-02: storeManage/memberStats는 아직 표준형(브래덴코)에서만 라이브 검증된 신규
-  // 엔드포인트라, 처갓집(분리형 dashboard)·샐러리아(dateRange 정산) 같은 변형 브랜드에도 같은
-  // 경로가 존재하는지 확인 전입니다. 위 3개(dashboard/settlementsSales/targetGroupStats)와 같은
-  // Promise.all에 넣으면 이 두 엔드포인트가 없는 브랜드는 기존에 멀쩡히 되던 수집까지 전부
-  // 실패하게 되므로, 별도의 Promise.allSettled로 분리해 실패해도 null + 경고 로그만 남기고
-  // 나머지 수집은 그대로 성공하도록 처리합니다. 변형 브랜드에서도 라이브 검증이 끝나면
-  // Promise.all로 통합할 수 있습니다.
-  const [storeManageResult, memberStatsResult] = await Promise.allSettled([
-    getStoreManage(cmsUrl, cookieHeader),
-    getMemberStats(cmsUrl, cookieHeader, endDt),
-  ]);
+  if (dashboardResult.status === "rejected") throw dashboardResult.reason;
+  if (settlementsResult.status === "rejected") throw settlementsResult.reason;
+  if (targetGroupResult.status === "rejected") throw targetGroupResult.reason;
 
   if (storeManageResult.status === "rejected") {
     console.warn(`[collectMonthlyData] storeManage 수집 실패(${cmsUrl}, ${yearMonth}):`, storeManageResult.reason);
@@ -275,5 +282,13 @@ export async function collectMonthlyData(
   const storeManage = storeManageResult.status === "fulfilled" ? storeManageResult.value : null;
   const memberStats = memberStatsResult.status === "fulfilled" ? memberStatsResult.value : null;
 
-  return { yearMonth, dashboard, settlementsSales, targetGroupStats, storeManage, memberStats, collectedAt: Date.now() };
+  return {
+    yearMonth,
+    dashboard: dashboardResult.value,
+    settlementsSales: settlementsResult.value,
+    targetGroupStats: targetGroupResult.value,
+    storeManage,
+    memberStats,
+    collectedAt: Date.now(),
+  };
 }
