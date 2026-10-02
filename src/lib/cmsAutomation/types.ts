@@ -30,8 +30,19 @@ export class CmsAutomationError extends Error {
   // 401/403을 돌려줬을 때만 씁니다(collect.ts의 getJson 참고). backfill.ts가 이 경우를 일반
   // COLLECT 실패와 구분해, 브랜드를 FAILED로 표시하는 대신 캐시된 세션만 비우고 다음 실행에서
   // 재로그인하도록 처리합니다.
-  step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED";
-  constructor(message: string, step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED") {
+  //
+  // "GATEWAY_TIMEOUT": 2026-10-02 (같은 날 추가) — CMS가 504를 돌려줬을 때만 씁니다. 이건 저희 쪽
+  // CMS_FETCH_TIMEOUT_MS(요청측 타임아웃)와는 무관하게 CMS 서버/인프라 자체가 요청을 포기한
+  // 경우라(브래덴코 2026-06 정산 조회가 저희 타임아웃을 110초로 올린 뒤에도 매번 정확히 60초에
+  // 504로 끊기는 것을 직접 재현까지 포함해 3회 연속 확인 — 담당자 확인 완료), 저희 쪽 타임아웃을
+  // 아무리 올려도 해결되지 않습니다. backfill.ts가 이 경우를 일반 COLLECT 실패와 구분해, 그 달을
+  // backfill_skipped_months에 기록하고 건너뛴 뒤 다음 달부터 계속 진행하도록 처리합니다(한 달이
+  // CMS 쪽 문제로 막히면 그 뒤 달들까지 전부 멈춰버리는 것을 막기 위함).
+  step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED" | "GATEWAY_TIMEOUT";
+  constructor(
+    message: string,
+    step: "LOGIN" | "PHONE_VERIFICATION" | "COLLECT" | "SESSION_EXPIRED" | "GATEWAY_TIMEOUT"
+  ) {
     super(message);
     this.step = step;
   }
