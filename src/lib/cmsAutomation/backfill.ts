@@ -1,7 +1,7 @@
 import { getAdminDb } from "@/lib/firebase/admin";
 import { decryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "./login";
-import { collectMonthlyData } from "./collect";
+import { collectMonthlyData, CMS_FETCH_TIMEOUT_MS } from "./collect";
 import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
 
 // 그로스잇 브랜드 백필(backfill) — 서비스 오픈일부터 전월까지의 과거 데이터를 한 번에 가져와
@@ -9,15 +9,24 @@ import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/type
 // 화면④ 같은 리뷰 단계 없이 CMS 원본값을 바로 저장하고(overrides는 빈 값, published는 false),
 // PPT는 만들지 않습니다 — 오직 전월대비(MoM) 비교용 기준 데이터를 쌓는 용도입니다.
 //
-// 서버리스 함수 시간 제한(현재 /api/brands/[id]/backfill의 maxDuration=60초) 안에 전체 기간을
-// 다 못 끝낼 수 있으므로(브랜드에 따라 서비스 오픈일부터 전월까지 수십 개월일 수 있음), 한 번의
-// 실행은 TIME_BUDGET_MS 예산 안에서 처리 가능한 만큼만 처리하고 중단합니다. 각 달을 수집할 때마다
-// 즉시 brandMonthlyData에 쓰고 brand.backfill_completed_through를 그 달로 갱신하므로, 도중에
-// 함수가 강제 종료되더라도 이미 처리한 달은 보존되고, 다음 호출은 backfill_completed_through
-// 다음 달부터 이어서 처리합니다(브랜드 관리 화면의 "백필 이어하기" 버튼이 이 엔드포인트를
-// 다시 호출하는 방식 — 완료될 때까지 몇 번이고 눌러도 안전합니다).
-
-const TIME_BUDGET_MS = 45_000;
+// 서버리스 함수 시간 제한(현재 /api/brands/[id]/backfill의 maxDuration=60초, HARD_LIMIT_MS) 안에
+// 전체 기간을 다 못 끝낼 수 있으므로(브랜드에 따라 서비스 오픈일부터 전월까지 수십 개월일 수 있음),
+// 한 번의 실행은 처리 가능한 만큼만 처리하고 안전하게 중단합니다. 각 달을 수집할 때마다 즉시
+// brandMonthlyData에 쓰고 brand.backfill_completed_through를 그 달로 갱신하므로, 도중에 함수가
+// 강제 종료되더라도 이미 처리한 달은 보존되고, 다음 호출은 backfill_completed_through 다음 달부터
+// 이어서 처리합니다(브랜드 관리 화면의 "백필 이어하기" 버튼이 이 엔드포인트를 다시 호출하는 방식 —
+// 완료될 때까지 몇 번이고 눌러도 안전합니다).
+//
+// 2026-10-02: 처음엔 TIME_BUDGET_MS=45초를 고정값으로 "달 시작 전"에만 체크했는데, 브래덴코
+// CMS 응답이 느려(42개 매장 집계) collect.ts의 요청별 타임아웃(CMS_FETCH_TIMEOUT_MS)을 15초→30초로
+// 올리고 나니 — 로그인+2개월 완료가 45초 budget 안에 들어와 3번째 달을 시작했는데, 그 달이 30초
+// 타임아웃을 꽉 채우면서 합계가 60초 하드 리밋을 넘겨 또 504(Vercel 강제종료)가 발생함. 즉
+// TIME_BUDGET_MS와 CMS_FETCH_TIMEOUT_MS가 서로 안 맞물려 있으면 타임아웃을 올릴 때마다 같은 사고가
+// 재발함. 그래서 "달 시작 전" 체크를 고정 예산이 아니라 "지금 시작하면 최악의 경우(이번 달이
+// CMS_FETCH_TIMEOUT_MS를 꽉 채움)에도 하드 리밋 전에 안전하게 끝나는가"로 바꿈 — collect.ts의
+// 타임아웃 값이 나중에 또 바뀌어도 이 계산식이 자동으로 따라가므로 같은 실수가 반복되지 않습니다.
+const HARD_LIMIT_MS = 60_000; // route.ts의 maxDuration과 일치시켜야 함
+const SAFETY_MARGIN_MS = 5_000; // Firestore 쓰기·응답 반환에 쓸 여유 시간
 
 // 서비스 오픈일(YYYY-MM-DD)의 달부터 "전월"(당월 제외 — 당월은 아직 끝나지 않아 집계 의미가 없음)
 // 까지의 연월(YYYY-MM) 목록을 오름차순으로 돌려줍니다.
@@ -95,7 +104,9 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
 
   const processed: string[] = [];
   for (const yearMonth of remaining) {
-    if (Date.now() - startedAt > TIME_BUDGET_MS) break; // 시간 예산 초과 — 다음 호출에서 이어감
+    // 지금 이 달을 시작했을 때 최악의 경우(= collect.ts 쪽 요청이 CMS_FETCH_TIMEOUT_MS를 꽉 채움)에도
+    // 하드 리밋 전에 안전하게 끝나는지로 판단 — 고정 예산이 아니라 실제 타임아웃 값에 연동된 계산식.
+    if (Date.now() - startedAt + CMS_FETCH_TIMEOUT_MS > HARD_LIMIT_MS - SAFETY_MARGIN_MS) break;
 
     const docId = `${brandId}_${yearMonth}`;
     try {
