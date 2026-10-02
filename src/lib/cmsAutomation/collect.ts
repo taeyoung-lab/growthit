@@ -84,9 +84,14 @@ function firstDayOfMonth(yearMonth: string): string {
 // 브래덴코 CMS 자체가 느린 게 맞는지 직접 라이브로 검증함(브래덴코 CMS에 로그인해 매출 정산 화면을
 // 월조회·2025-08로 직접 조회 — 42개 매장·996건 주문 집계라 5초 시점엔 아직 이전 응답이었고 15초
 // 시점엔 이미 새 결과가 떠 있었음, 즉 실제 CMS 응답 자체가 10~15초대). 42개 매장(영커피 등은 매장
-// 1곳)이라 집계량이 커서 생기는 정상적인 지연이므로, 쿼리를 바꾸는 대신 타임아웃을 30초로 올림 —
-// 로그인(~6초)+한 달치 조회(~15초 내외)를 합쳐도 60초 하드 리밋에 여유 있게 들어옴.
-const CMS_FETCH_TIMEOUT_MS = 30_000;
+// 1곳)이라 집계량이 커서 생기는 정상적인 지연이므로, 쿼리를 바꾸는 대신 타임아웃을 30초로 올림.
+//
+// backfill.ts가 이 값을 가져다 "다음 달을 시작해도 안전한지" 판단하는 데 쓰므로(60초 하드 리밋
+// 안에서 역산), export합니다 — 둘이 따로 노는 상수로 각자 관리되다 보니 이번에 30초로 올렸을 때
+// backfill.ts의 TIME_BUDGET_MS(45초, 고정값)는 안 고쳐서 또 504가 났습니다(로그인+2개월 완료 후
+// 3번째 달 시작 시점이 45초 budget 안이라 진행했는데, 그 달이 타임아웃 꽉 채우면서 60초 하드
+// 리밋을 넘겨버림). 같은 실수가 반복되지 않도록 이 상수 하나로 양쪽이 맞물리게 함.
+export const CMS_FETCH_TIMEOUT_MS = 30_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
