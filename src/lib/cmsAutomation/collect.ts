@@ -99,7 +99,19 @@ function firstDayOfMonth(yearMonth: string): string {
 // 주문량(1,555건)이 더 많아서 생기는 정상적인 지연으로 판단, 30→45초로 추가 상향. backfill.ts의
 // 중단 로직이 이 값에서 자동으로 역산되므로(HARD_LIMIT_MS - SAFETY_MARGIN_MS 기준) 이 상수만
 // 바꾸면 되고 TIME_BUDGET_MS류 상수를 따로 손볼 필요가 없음 — 바로 그 재발 방지가 지난 수정의 목적.
-export const CMS_FETCH_TIMEOUT_MS = 45_000;
+//
+// 2026-10-02 (같은 날, 추가 상향): 이번엔 2026-03이 45초에서도 4번 연속 동일하게 실패(실행시간
+// 48.17~48.20초, 개선 추세 없음) — 2025-11과 달리 "가끔 느린" 게 아니라 "이 달은 구조적으로
+// 45초보다 오래 걸린다"는 신호라서 재시도로는 해결이 안 됨. 브래덴코 CMS에 직접 로그인해 동일
+// 요청을 재현한 결과 47.4초(HTTP 200, 정상 응답 — 에러 아님, 느릴 뿐) 확인. 45→54초로 상향.
+// 주의: HARD_LIMIT_MS(60초) - SAFETY_MARGIN_MS(5초) = 55초가 이 값이 넘지 말아야 할 구조적
+// 상한선 — backfill.ts의 중단 로직이 "이번 달을 시작해도 안전한가"를 CMS_FETCH_TIMEOUT_MS 기준
+// 최악의 경우로 역산하기 때문에, 이 값이 55초 이상이 되면 단 한 달도 시작하지 못하고 매번 즉시
+// 중단돼버림(2026-03뿐 아니라 전체 백필이 멈춤). 54초는 그 바로 아래 선이자, 실측 47.4초 대비
+// 약 6.6초 여유를 남긴 값. 이후에도 더 느린 달이 나오면 이 상수 하나만 다시 올리면 되지만, 55초
+// 근처에서는 더 이상 여유가 없으므로 그때는 maxDuration(route.ts) 자체를 늘리는 구조적 변경이
+// 필요함.
+export const CMS_FETCH_TIMEOUT_MS = 54_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
