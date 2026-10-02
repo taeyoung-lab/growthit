@@ -104,6 +104,7 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     }
 
     const currentUrl = page.url();
+    log(`post-login url: ${currentUrl}`);
     if (currentUrl.includes("/login")) {
       throw new CmsAutomationError(
         "로그인에 실패했습니다(로그인 화면에 그대로 머물러 있음) — 저장된 CMS 계정 정보 또는 고정 인증번호를 확인해주세요.",
@@ -112,7 +113,10 @@ export async function loginToCms(config: CmsLoginConfig): Promise<CmsSession> {
     }
 
     const cookies = await page.cookies();
-    log("cookies collected, returning");
+    // 값은 절대 로그에 남기지 않고, 어떤 쿠키 "이름"이 발급됐는지만 확인합니다 — 세션 쿠키가 실제로
+    // 발급됐는지(로그인은 "성공"처럼 보였지만 실제 세션 없이 그냥 다른 화면으로 튕긴 경우가 있는지)
+    // 진단하기 위함입니다.
+    log(`cookies collected (names only): ${cookies.map((c) => c.name).join(", ")}`);
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
     return { cookieHeader };
   } finally {
