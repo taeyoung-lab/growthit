@@ -1,4 +1,5 @@
 import { getAdminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { decryptCmsPassword, encryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "./login";
 import { collectMonthlyData, CMS_FETCH_TIMEOUT_MS } from "./collect";
@@ -43,6 +44,15 @@ const SESSION_CACHE_TTL_MS = 20 * 60 * 1000; // 20분
 const HARD_LIMIT_MS = 120_000; // route.ts의 maxDuration과 일치시켜야 함
 const SAFETY_MARGIN_MS = 5_000; // Firestore 쓰기·응답 반환에 쓸 여유 시간
 
+// 2026-10-02 (같은 날, 위 120초 상향 직후): 브래덴코 2026-06 정산 조회는 타임아웃을 아무리 올려도
+// 해결되지 않는 종류의 실패였음 — CMS_FETCH_TIMEOUT_MS(110초)와 무관하게 CMS 서버 자체가 매번
+// 정확히 60초에 504를 돌려줌(직접 재현까지 포함해 3회 연속 확인, 담당자 확인 완료). 이런 "CMS
+// 서버 자체의 게이트웨이 타임아웃"(collect.ts의 getJson이 GATEWAY_TIMEOUT으로 구분해서 던짐)은
+// 아래 for 루프에서 그 달을 backfill_skipped_months에 기록하고 건너뛴 뒤 다음 달부터 계속
+// 진행합니다 — 그 외의 일반 실패(COLLECT 등)는 기존대로 FAILED로 멈추고 담당자가 "백필
+// 이어하기"로 재시도하도록 그대로 둡니다(원인을 알 수 없는 새로운 종류의 실패까지 자동으로
+// 건너뛰어 버리면 진짜 고쳐야 할 버그를 놓칠 수 있으므로, 건너뛰기는 확인된 이 에러 종류로만 한정).
+
 // 서비스 오픈일(YYYY-MM-DD)의 달부터 "전월"(당월 제외 — 당월은 아직 끝나지 않아 집계 의미가 없음)
 // 까지의 연월(YYYY-MM) 목록을 오름차순으로 돌려줍니다.
 function monthsFromOpenDateThroughLastMonth(serviceOpenDate: string): string[] {
@@ -73,6 +83,9 @@ function monthsFromOpenDateThroughLastMonth(serviceOpenDate: string): string[] {
 export interface BackfillBatchResult {
   done: boolean; // true면 서비스 오픈일~전월 전체가 이번 호출로 완료됨
   processedMonths: string[]; // 이번 호출에서 실제로 처리한 연월 목록(빈 배열이면 더 처리할 달이 없었음)
+  // 이번 호출에서 GATEWAY_TIMEOUT으로 건너뛴 연월 목록(위 HARD_LIMIT_MS 주석 참고) — 브랜드 관리
+  // 화면에서 "이번 실행에서 N개월 처리함" 메시지에 함께 보여주기 위함.
+  skippedMonths: string[];
 }
 
 export async function runBackfillBatch(brandId: string): Promise<BackfillBatchResult> {
@@ -97,7 +110,7 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
 
   if (remaining.length === 0) {
     await brandRef.update({ backfill_status: "COMPLETED", updated_at: Date.now() });
-    return { done: true, processedMonths: [] };
+    return { done: true, processedMonths: [], skippedMonths: [] };
   }
 
   await brandRef.update({ backfill_status: "IN_PROGRESS", updated_at: Date.now() });
@@ -135,11 +148,12 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
     });
     // 아직 어떤 달도 처리하지 않았으니 "대기" 상태로 남겨 "백필 이어하기"가 계속 보이게 합니다.
     await brandRef.update({ backfill_status: "PENDING", updated_at: Date.now() });
-    return { done: false, processedMonths: [] };
+    return { done: false, processedMonths: [], skippedMonths: [] };
   }
 
   const session = { cookieHeader: decryptCmsPassword(cachedCookie!) };
   const processed: string[] = [];
+  const skipped: string[] = [];
   for (const yearMonth of remaining) {
     // 지금 이 달을 시작했을 때 최악의 경우(= collect.ts 쪽 요청이 CMS_FETCH_TIMEOUT_MS를 꽉 채움)에도
     // 하드 리밋 전에 안전하게 끝나는지로 판단 — 고정 예산이 아니라 실제 타임아웃 값에 연동된 계산식.
@@ -179,22 +193,41 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
         console.warn(`[backfill] ${brandId} ${yearMonth} 캐시된 세션 만료 감지 — 캐시 비우고 재로그인 예정`, e);
         await credsRef.update({ cms_session_cookie_encrypted: null, cms_session_cached_at: null });
         await brandRef.update({ backfill_status: "PENDING", updated_at: Date.now() });
-        return { done: false, processedMonths: processed };
+        return { done: false, processedMonths: processed, skippedMonths: skipped };
+      }
+      if (e instanceof CmsAutomationError && e.step === "GATEWAY_TIMEOUT") {
+        // 2026-10-02: CMS 서버 자체의 게이트웨이 타임아웃(저희 쪽 타임아웃 설정과 무관 — collect.ts
+        // 주석 참고)이라 재시도해도 해결되지 않을 가능성이 높음을 담당자가 직접 재현 결과로 확인하고,
+        // 이 달은 건너뛰고 다음 달부터 계속 진행하기로 결정함. backfill_completed_through는 그대로
+        // 이 달로 전진시켜(그래야 다음 호출이 이 달에서 계속 멈추지 않음) 다음 달부터 이어가고,
+        // 어떤 달을 건너뛰었는지는 backfill_skipped_months에 남겨 브랜드 관리 화면에서 보이게 합니다.
+        console.warn(`[backfill] ${brandId} ${yearMonth} CMS 게이트웨이 타임아웃 — 건너뛰고 계속 진행`, e);
+        skipped.push(yearMonth);
+        // eslint-disable-next-line no-await-in-loop -- 위 성공 경로와 동일하게, 중간에 함수가
+        // 강제 종료돼도 건너뛴 기록이 보존되도록 즉시 씁니다.
+        await brandRef.update({
+          backfill_completed_through: yearMonth,
+          backfill_skipped_months: FieldValue.arrayUnion(yearMonth),
+          updated_at: Date.now(),
+        });
+        continue;
       }
       // 한 달이 실패해도 그 이전까지는 이미 저장된 상태로 남겨두고, FAILED로 표시해 담당자가
       // 알아챌 수 있게 합니다 — "백필 이어하기"를 다시 누르면 실패한 달부터 재시도합니다.
       console.error(`[backfill] ${brandId} ${yearMonth} 수집 실패`, e);
       await brandRef.update({ backfill_status: "FAILED", updated_at: Date.now() });
-      return { done: false, processedMonths: processed };
+      return { done: false, processedMonths: processed, skippedMonths: skipped };
     }
   }
 
-  const isDone = processed.length === remaining.length;
+  // GATEWAY_TIMEOUT으로 건너뛴 달도 "이번 배치에서 처리(= remaining에서 소진)"한 것으로 쳐야
+  // 진행률 판단(done 여부)이 맞습니다 — 그 달 자체는 데이터가 없지만, 더 이상 막혀있지 않습니다.
+  const isDone = processed.length + skipped.length === remaining.length;
   await brandRef.update({
     // 시간 예산 초과로 다 못 끝냈으면 PENDING으로 남겨 "백필 이어하기"가 계속 보이게 합니다.
     backfill_status: isDone ? "COMPLETED" : "PENDING",
     updated_at: Date.now(),
   });
-  return { done: isDone, processedMonths: processed };
+  return { done: isDone, processedMonths: processed, skippedMonths: skipped };
 }
 
