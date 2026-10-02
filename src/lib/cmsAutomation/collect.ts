@@ -112,7 +112,20 @@ function firstDayOfMonth(yearMonth: string): string {
 // (캐시가 없거나 만료된 실행은 로그인만 하고 끝내고 이 값을 아예 쓰지 않으므로 영향 없음 — backfill.ts
 // 상단 주석 참고.) 54초는 여전히 HARD_LIMIT_MS(60초)-SAFETY_MARGIN_MS(5초)=55초 바로 아래 선이자,
 // 2026-03 실측 47.4~48.2초 대비 약 6~7초 여유를 남긴 값.
-export const CMS_FETCH_TIMEOUT_MS = 54_000;
+//
+// 2026-10-02 (54초도 한계로 드러남 — 60초가 플랫폼 한도라는 전제 자체가 틀렸던 것으로 판명):
+// 2026-04 정산 조회가 54초 타임아웃을 2회 연속 동일하게 초과. "가끔 느린" 2025-11·2026-03과
+// 달리 재시도로는 해결되지 않는 신호라, 브래덴코 CMS에 직접 재현 요청(동일 URL·쿠키)해 확인한
+// 결과 56.1초(HTTP 200, 정상 응답 — 데이터는 옴, 단지 느릴 뿐) 소요. 이 시점에 "60초는 Vercel
+// 서버리스 함수의 플랫폼 자체 한도"라는, 이 프로젝트가 처음부터 전제해온 가정이 틀렸다는 것을
+// 확인함 — Vercel 공식 문서(Functions > Configuring Functions > Duration)상 Hobby 플랜도 Fluid
+// Compute 기준 maxDuration을 기본/최대 300초(5분)까지 지원. 60초는 route.ts에 이 프로젝트가
+// 초반에 임의로 넣어둔 값일 뿐이었음. 담당자 확인 후 route.ts의 maxDuration을 120초로,
+// backfill.ts의 HARD_LIMIT_MS도 120초로 함께 상향 — 이 값(CMS_FETCH_TIMEOUT_MS)도 지금까지
+// 관측된 월별 CMS 응답시간(45~56초) 대비 넉넉한 여유를 두고 110초로 재상향함. 세션 재사용
+// 구조(backfill.ts 상단 주석 참고)는 그대로 유지 — 로그인 오버헤드를 매 실행 예산에서 계속
+// 제거해주는 별도의 안전장치로 유효함.
+export const CMS_FETCH_TIMEOUT_MS = 110_000;
 
 async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
