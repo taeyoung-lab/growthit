@@ -18,7 +18,14 @@ import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/type
 // 플로우에서의 수동 1개월 수집) 전용이며, 백필 전용 실행 로직은 별도 구현 예정입니다.
 //
 // Puppeteer 로그인이 느릴 수 있어 기본 서버리스 함수 제한 시간을 늘립니다.
-export const maxDuration = 60;
+//
+// 2026-10-02: 60→120초로 상향. 브래덴코·2026-09 수동 수집이 이 라우트에서만 매번 504로 실패 —
+// 같은 날 영커피(빠른 CMS)는 정상 성공해서 코드 문제가 아니라 시간 문제로 판단. 브래덴코 CMS 정산
+// 조회가 달에 따라 45~56초(collect.ts CMS_FETCH_TIMEOUT_MS 연혁 주석 참고)이고 여기에 로그인(3~6초)과
+// 나머지 호출이 더해지면 60초를 넘기는데, 백필 라우트(backfill/route.ts)는 이미 120초로 올려둔 반면
+// 이 라우트만 60초로 남아 있었습니다(Hobby 플랜도 Fluid Compute 기준 최대 300초 지원 — 백필 라우트
+// 주석 참고). 백필 라우트·collect.ts의 CMS_FETCH_TIMEOUT_MS(110초)와 같은 기준으로 맞춥니다.
+export const maxDuration = 120;
 export const runtime = "nodejs";
 
 interface CollectRequestBody {
