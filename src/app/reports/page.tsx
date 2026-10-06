@@ -192,9 +192,9 @@ function ReportsContent() {
   function hydrate(inp: ReportInput) {
     const o = inp.overrides ?? {};
     const fd = inp.feeDefaults;
-    setFeeD(rateStr(o.fee_delivery_rate !== undefined ? o.fee_delivery_rate : fd?.delivery_rate));
-    setFeeP(rateStr(o.fee_pickup_rate !== undefined ? o.fee_pickup_rate : fd?.pickup_rate));
-    setBench(rateStr(o.benchmark_rate !== undefined ? o.benchmark_rate : fd?.benchmark_rate ?? DEFAULT_BENCHMARK_FEE_RATE));
+    setFeeD(rateStr(o.fee_delivery_rate ?? fd?.delivery_rate));
+    setFeeP(rateStr(o.fee_pickup_rate ?? fd?.pickup_rate));
+    setBench(rateStr(o.benchmark_rate ?? fd?.benchmark_rate ?? DEFAULT_BENCHMARK_FEE_RATE));
     setGoals(o.next_goals ?? []);
     setActions(o.actions ?? []);
     const prevReview = o.prev_review ?? [];
