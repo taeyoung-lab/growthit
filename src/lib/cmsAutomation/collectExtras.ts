@@ -9,9 +9,12 @@
 // 처갓집(분리형 대시보드)은 구조가 달라 이 모듈을 건너뜁니다(collect.ts) — 샐러리아·브래덴코 등
 // 나머지 표준형도 같은 경로를 시도하되, 섹션별로 실패해도(null) 전체 수집은 계속됩니다.
 //
-// "온라인 매출" = 그로스잇 앱 결제(salesTp 962001), "오프라인 매출" = 매장 직접 결제(962002) —
-// 매장별 매출 통계 화면의 열 이름과 실제 수치(영커피 2026-09: 온라인 31%·오프라인 69%)로 확인했습니다.
-// 담당자(2026-10-05) 결정: 그로스잇 매출액 = 매출통계의 앱결제액 = 온라인 실결제액(배달비 제외).
+// 매출발생구분: 온라인(salesTp 962001) = 앱 + 배달플랫폼(배달의민족·쿠팡이츠·요기요 등), 오프라인(962002) = POS.
+// 온라인 안의 채널 코드(963xxx, /api/code/sub/963): 963001 우리가잇다(=그로스잇 앱), 963002 배달의민족,
+// 963003 쿠팡이츠, 963004 POS, 963005 요기요, 963006 DKY, 963007 NAVER, 963008 배달통.
+// 담당자(2026-10-06) 확정: 그로스잇 매출액 = 매출통계의 앱결제액 = "우리가잇다"(963001) 실결제액(배달비 제외).
+// 온라인 전체(배달플랫폼 포함)가 아님 — 그래서 각 매출 행에 `app`(963001만)을 따로 담고, 온라인 채널별 합계는
+// `onlineChannels`로 저장해 배달앱 대비 비교에 씁니다.
 //
 // 개인정보: /api/order는 고객 이름·로그인ID가 섞인 원본이라 저장하지 않습니다. 주문 목록을 다 읽은 뒤
 // 서버 메모리에서 (고객번호 cusId → 주문 수·결제액)으로만 집계하고, 요일·시간대 분포와 함께 돌려줍니다.
@@ -38,8 +41,15 @@ export interface SalesRow {
   name: string; // 매장명 / 메뉴명 / "성별 연령대"
   storeId: number | null;
   all: SalesSplit;
-  online: SalesSplit | null; // 앱 결제
-  offline: SalesSplit | null; // 매장 직접 결제
+  online: SalesSplit | null; // 온라인 전체(앱+배달플랫폼, 962001)
+  offline: SalesSplit | null; // 오프라인(POS, 962002)
+  app: SalesSplit | null; // 우리가잇다(963001) = 그로스잇 앱결제액. 앱 매출이 없는 행은 null
+}
+export interface OnlineChannelRow {
+  code: string; // 963001 …
+  name: string; // 우리가잇다·배달의민족·쿠팡이츠 …
+  split: SalesSplit;
+  share: number; // 온라인 내 비중(%) — CMS가 계산한 값
 }
 export interface OrderAggregate {
   orderCount: number; // 취소 제외
@@ -57,6 +67,7 @@ export interface CmsExtras {
   salesStore: SalesRow[] | null; // [0]이 "전체" 합계 행
   salesItem: SalesRow[] | null; // 결제액 상위 메뉴 최대 TOP_ITEMS개 (+ 전체 행)
   salesGenderAge: SalesRow[] | null;
+  onlineChannels: OnlineChannelRow[] | null; // 온라인 채널(앱·배달플랫폼)별 합계
   dailyBrandSet: Record<string, number> | null; // 매장 이용료·적용 매장수·신규 매장 등 브랜드 요약
   visitors: { date: string; total: number; aos: number; ios: number }[] | null;
   coupons: { couponGb: string | null; issued: number; used: number; rate: number; dcAmt: number }[] | null;
@@ -83,6 +94,18 @@ export interface ExtrasResult {
 const TOP_ITEMS = 40;
 const ONLINE = "962001";
 const OFFLINE = "962002";
+const APP_CHANNEL = "963001"; // 우리가잇다 = 그로스잇 앱
+// /api/code/sub/963 조회가 안 될 때의 대비용 이름(영커피 확인값)
+const CHANNEL_NAMES: Record<string, string> = {
+  "963001": "우리가잇다",
+  "963002": "배달의민족",
+  "963003": "쿠팡이츠",
+  "963004": "POS",
+  "963005": "요기요",
+  "963006": "DKY",
+  "963007": "NAVER",
+  "963008": "배달통",
+};
 const ORDER_STATUS = "351002,351004,351006,351007,351031,351040,351041";
 const ORDER_PAGE_SIZE = 500;
 const ORDER_MAX_PAGES = 300;
@@ -128,8 +151,14 @@ function toSalesRow(raw: unknown, name: string): SalesRow {
     all: salesSplit(r),
     online: byTp(ONLINE),
     offline: byTp(OFFLINE),
+    app: null,
   };
 }
+// salesTp=962001&channel=963001로 조회한 응답 — 합계 필드 자체가 우리가잇다(앱) 값입니다.
+function toAppSplit(raw: unknown): SalesSplit {
+  return salesSplit(rec(raw));
+}
+const rowKey = (storeId: number | null, name: string) => `${storeId ?? ""}|${name}`;
 
 function withTimeout<T>(p: Promise<T>, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -160,29 +189,90 @@ async function section<T>(label: string, fn: () => Promise<T>): Promise<T | null
 
 // ── 섹션별 수집 ──────────────────────────────────────────────────────────────
 
+const APP_FILTER = `salesTp=${ONLINE}&channel=${APP_CHANNEL}`;
+
 async function fetchSalesStore(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
-  const q = `page=1&perPage=500&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&salesTp=&channel=&isStoreAdmin=false&sortColumn=&sortDir=`;
-  const j = rec(await getJson(cmsUrl, `/api/salesStats/store?${q}`, ck));
-  return arr(j.list).map((r) => toSalesRow(r, str(rec(r).gubun)));
+  const base = `page=1&perPage=500&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m`;
+  const tail = "isStoreAdmin=false&sortColumn=&sortDir=";
+  const [allJ, appJ] = await Promise.all([
+    getJson(cmsUrl, `/api/salesStats/store?${base}&salesTp=&channel=&${tail}`, ck),
+    // 앱(우리가잇다) 조회가 실패해도 전체 행은 살립니다 — app만 비어 있게 됩니다.
+    getJson(cmsUrl, `/api/salesStats/store?${base}&${APP_FILTER}&${tail}`, ck).catch((e) => {
+      if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+      console.warn("[collectExtras] 매장별 앱(우리가잇다) 매출 수집 실패:", e instanceof Error ? e.message : e);
+      return null;
+    }),
+  ]);
+  const appByKey = new Map<string, SalesSplit>();
+  for (const r of arr(rec(appJ).list)) {
+    const o = rec(r);
+    appByKey.set(rowKey(typeof o.storeId === "number" ? o.storeId : null, str(o.gubun)), toAppSplit(o));
+  }
+  return arr(rec(allJ).list).map((r) => {
+    const row = toSalesRow(r, str(rec(r).gubun));
+    row.app = appByKey.get(rowKey(row.storeId, row.name)) ?? null;
+    return row;
+  });
 }
 
-// 메뉴는 665개처럼 많아서 한 번에 받으면 1MB를 넘습니다 — 페이지 단위로 받아 결제액 상위만 남깁니다.
-async function fetchSalesItem(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
-  const rows: SalesRow[] = [];
-  let totalRow: SalesRow | null = null;
+// 온라인 안의 채널별(우리가잇다·배달의민족·쿠팡이츠…) 합계 — 전체 행의 salesStatsList가 채널 단위로 쪼개집니다.
+async function fetchOnlineChannels(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
+  const q = `page=1&perPage=1&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&salesTp=${ONLINE}&channel=&isStoreAdmin=false&sortColumn=&sortDir=`;
+  const j = rec(await getJson(cmsUrl, `/api/salesStats/store?${q}`, ck));
+  const total = rec(arr(j.list)[0]);
+  let names = new Map<string, string>(Object.entries(CHANNEL_NAMES));
+  try {
+    const codes = await getJson(cmsUrl, "/api/code/sub/963", ck);
+    const list = Array.isArray(codes) ? codes : arr(rec(codes).list);
+    names = new Map(list.map(rec).map((c) => [str(c.codeId), str(c.codeName)] as [string, string]).filter(([id, nm]) => id && nm));
+    for (const [k, v] of Object.entries(CHANNEL_NAMES)) if (!names.has(k)) names.set(k, v);
+  } catch (e) {
+    if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+  }
+  return arr(total.salesStatsList)
+    .map(rec)
+    .map((o): OnlineChannelRow => {
+      const code = str(o.salesTp);
+      return { code, name: names.get(code) ?? code, split: salesSplit(o), share: num(o.totalSalesPer) };
+    });
+}
+
+// 메뉴는 665개처럼 많아서 한 번에 받으면 1MB를 넘습니다 — 페이지 단위로 받아 상위만 남깁니다.
+// 순위는 그로스잇 앱결제액(우리가잇다) 기준, 앱 매출이 같으면(0) 전체 결제액 기준입니다.
+async function pageItems(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string, filter: string) {
+  const rows: Record<string, unknown>[] = [];
   const perPage = 200;
   for (let page = 1; page <= 10; page++) {
-    const q = `page=${page}&perPage=${perPage}&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&salesTp=&channel=&isStoreAdmin=false`;
+    const q = `page=${page}&perPage=${perPage}&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&${filter}&isStoreAdmin=false`;
     const j = rec(await getJson(cmsUrl, `/api/salesStats/item?${q}`, ck));
     const list = arr(j.list);
-    for (const r of list) {
-      const row = toSalesRow(r, str(rec(r).gubun));
-      if (row.name === "전체") totalRow = row;
-      else rows.push(row);
-    }
+    for (const r of list) rows.push(rec(r));
     if (list.length < perPage || page * perPage >= num(j.totalCnt)) break;
   }
-  rows.sort((a, b) => b.all.total.pay - a.all.total.pay);
+  return rows;
+}
+
+async function fetchSalesItem(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
+  const [allRows, appRows] = await Promise.all([
+    pageItems(getJson, cmsUrl, ck, startDt, endDt, "salesTp=&channel="),
+    pageItems(getJson, cmsUrl, ck, startDt, endDt, APP_FILTER).catch((e) => {
+      if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+      console.warn("[collectExtras] 메뉴별 앱(우리가잇다) 매출 수집 실패:", e instanceof Error ? e.message : e);
+      return [] as Record<string, unknown>[];
+    }),
+  ]);
+  const appByName = new Map<string, SalesSplit>();
+  for (const o of appRows) appByName.set(str(o.gubun), toAppSplit(o));
+
+  const rows: SalesRow[] = [];
+  let totalRow: SalesRow | null = null;
+  for (const o of allRows) {
+    const row = toSalesRow(o, str(o.gubun));
+    row.app = appByName.get(row.name) ?? null;
+    if (row.name === "전체") totalRow = row;
+    else rows.push(row);
+  }
+  rows.sort((a, b) => (b.app?.total.pay ?? 0) - (a.app?.total.pay ?? 0) || b.all.total.pay - a.all.total.pay);
   return [...(totalRow ? [totalRow] : []), ...rows.slice(0, TOP_ITEMS)];
 }
 
@@ -374,6 +464,7 @@ export async function collectExtras(
     salesStore,
     salesItem,
     salesGenderAge,
+    onlineChannels,
     dailyBrandSet,
     visitors,
     coupons,
@@ -386,6 +477,7 @@ export async function collectExtras(
     section("매장별 매출통계", () => fetchSalesStore(getJson, cmsUrl, ck, startDt, endDt)),
     section("메뉴별 매출통계", () => fetchSalesItem(getJson, cmsUrl, ck, startDt, endDt)),
     section("성별/연령별 매출통계", () => fetchGenderAge(getJson, cmsUrl, ck, startDt, endDt)),
+    section("온라인 채널별 매출", () => fetchOnlineChannels(getJson, cmsUrl, ck, startDt, endDt)),
     section("일자별 매장 매출(브랜드 요약)", () => fetchDailyBrandSet(getJson, cmsUrl, ck, yearMonth, startDt, endDt)),
     section("방문자 통계", () => fetchVisitors(getJson, cmsUrl, ck, startDt, endDt)),
     section("쿠폰 통계", () => fetchCoupons(getJson, cmsUrl, ck, startDt, endDt)),
@@ -401,6 +493,7 @@ export async function collectExtras(
       salesStore,
       salesItem,
       salesGenderAge,
+      onlineChannels,
       dailyBrandSet,
       visitors,
       coupons,
