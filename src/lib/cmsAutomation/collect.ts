@@ -2,6 +2,7 @@ import { CmsAutomationError } from "./types";
 import type { CmsCollectionResult, CmsSession } from "./types";
 import { parseFirstSheetRows } from "./xlsxLite";
 import { settlementsRowsToJson } from "./settlementsExcel";
+import { collectExtras } from "./collectExtras";
 
 // 로그인 이후 데이터 수집 — 화면을 다시 띄우지 않고, 로그인으로 얻은 쿠키를 그대로 실어 CMS가
 // 내부적으로 쓰는 JSON API를 직접 호출합니다(login.ts 상단 주석 참고 — 2026-10-01 청자다방
@@ -129,7 +130,7 @@ function firstDayOfMonth(yearMonth: string): string {
 // 제거해주는 별도의 안전장치로 유효함.
 export const CMS_FETCH_TIMEOUT_MS = 110_000;
 
-async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
+export async function getJson(cmsUrl: string, path: string, cookieHeader: string): Promise<unknown> {
   const url = new URL(path, cmsUrl).toString();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CMS_FETCH_TIMEOUT_MS);
@@ -331,13 +332,19 @@ export async function collectMonthlyData(
   // 2개만 실패를 허용(null + 경고 로그)합니다 — 처갓집(분리형 dashboard)·샐러리아(dateRange 정산)
   // 등 아직 이 두 엔드포인트가 라이브 검증되지 않은 변형 브랜드에서 404/500이 나더라도 기존
   // 3개 데이터 수집 자체는 그대로 성공하도록 하기 위함입니다.
-  const [dashboardResult, settlementsResult, targetGroupResult, storeManageResult, memberStatsResult] =
+  // 2026-10-05: 리포트 8개 섹션용 추가 통계(collectExtras.ts) — 처갓집형(분리형 대시보드)은 엔드포인트
+  // 구조가 달라 건너뜁니다. 위 호출들과 같은 allSettled에 넣어 동시에 실행하므로 전체 소요시간은 가장
+  // 느린 호출 기준 그대로이고, 실패해도(null) 기존 수집 결과에는 영향이 없습니다.
+  const [dashboardResult, settlementsResult, targetGroupResult, storeManageResult, memberStatsResult, extrasResult] =
     await Promise.allSettled([
       getDashboard(variant.dashboard, cmsUrl, cookieHeader, yearMonth, endDt),
       getSettlementsWithFallback(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
       getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
       getStoreManage(cmsUrl, cookieHeader),
       getMemberStats(cmsUrl, cookieHeader, endDt),
+      variant.dashboard === "granular"
+        ? Promise.resolve(null)
+        : collectExtras(getJson, cmsUrl, cookieHeader, yearMonth, startDt, endDt),
     ]);
 
   if (dashboardResult.status === "rejected") throw dashboardResult.reason;
@@ -351,6 +358,11 @@ export async function collectMonthlyData(
     console.warn(`[collectMonthlyData] memberStats 수집 실패(${cmsUrl}, ${yearMonth}):`, memberStatsResult.reason);
   }
 
+  if (extrasResult.status === "rejected") {
+    console.warn(`[collectMonthlyData] extras 수집 실패(${cmsUrl}, ${yearMonth}):`, extrasResult.reason);
+  }
+  const extrasValue = extrasResult.status === "fulfilled" ? extrasResult.value : null;
+
   const storeManage = storeManageResult.status === "fulfilled" ? storeManageResult.value : null;
   const memberStats = memberStatsResult.status === "fulfilled" ? memberStatsResult.value : null;
 
@@ -362,6 +374,8 @@ export async function collectMonthlyData(
     targetGroupStats: targetGroupResult.value,
     storeManage,
     memberStats,
+    extras: extrasValue ? extrasValue.extras : null,
+    memberOrderAgg: extrasValue ? extrasValue.memberOrderAgg : null,
     collectedAt: Date.now(),
   };
 }
