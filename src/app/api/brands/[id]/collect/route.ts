@@ -5,6 +5,7 @@ import { decryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "@/lib/cmsAutomation/login";
 import { collectMonthlyData } from "@/lib/cmsAutomation/collect";
 import { CmsAutomationError } from "@/lib/cmsAutomation/types";
+import { saveMemberAggregates, fitMonthlyDataSize } from "@/lib/cmsAutomation/memberAggStore";
 import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
 
 // 그로스잇 브랜드 CMS 자동 수집 트리거 — 저장된 계정으로 헤드리스 브라우저 로그인 후(login.ts),
@@ -110,14 +111,15 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       brand_id: params.id,
       year_month: yearMonth,
       source: "MANUAL",
-      data: {
+      data: fitMonthlyDataSize({
         dashboard: collected.dashboard,
         settlementsSales: collected.settlementsSales,
         settlementSource: collected.settlementSource,
         targetGroupStats: collected.targetGroupStats,
         storeManage: collected.storeManage,
         memberStats: collected.memberStats,
-      },
+        extras: collected.extras,
+      }),
       // 기존에 담당자가 화면④에서 직접 고친 값(overrides)이 있다면 재수집 시에도 보존합니다 —
       // 원본(data)만 최신 수집값으로 갈아끼우고, 사람이 직접 고친 값은 자동 덮어쓰기 대상이 아닙니다.
       overrides: (existing.exists && (existing.data() as BrandMonthlyData).overrides) || {},
@@ -127,6 +129,20 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       updated_at: now,
     };
     await db.collection("brandMonthlyData").doc(docId).set(data);
+    // 회원별 월간 구매 집계는 용량 때문에 별도 컬렉션에 저장합니다. 실패해도 위 본 데이터는 이미 저장됐으므로
+    // 수집 전체를 실패로 돌리지 않고 경고만 남깁니다(회원 지표만 비게 됨).
+    if (collected.memberOrderAgg) {
+      try {
+        await saveMemberAggregates(db, {
+          brandId: params.id,
+          organizationId: brand.organization_id,
+          yearMonth,
+          agg: collected.memberOrderAgg,
+        });
+      } catch (e) {
+        console.warn(`[POST /api/brands/${params.id}/collect] 회원 집계 저장 실패`, e);
+      }
+    }
 
     return NextResponse.json({ ok: true, year_month: yearMonth, data });
   } catch (e) {
