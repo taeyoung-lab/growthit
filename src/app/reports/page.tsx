@@ -56,6 +56,7 @@ function ReportsContent() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [collectSummary, setCollectSummary] = useState<string | null>(null);
+  const [collectNotice, setCollectNotice] = useState<string | null>(null);
 
   const selectedBrand = brands.find((b) => b.id === brandId) ?? null;
 
@@ -161,6 +162,12 @@ function ReportsContent() {
       setCollectSummary(
         `${yearMonth} 데이터 수집 완료 — 대시보드: ${JSON.stringify(result.data?.data?.dashboard ?? {}).slice(0, 200)}`
       );
+      // 정산 JSON이 CMS 타임아웃으로 실패해 엑셀 다운로드로 대체된 달은 값이 조금 다를 수 있어 알립니다.
+      setCollectNotice(
+        result.data?.data?.settlementSource === "EXCEL_FALLBACK"
+          ? "정산 데이터는 CMS 정산 조회가 지연돼 엑셀 다운로드 경로로 대신 가져왔습니다. 서비스이용료 세부 내역은 없고, 폐업 매장 등의 마이너스 조정 값은 CMS 화면과 다를 수 있습니다."
+          : null
+      );
       setStep("done");
     } catch (e) {
       console.error("[ReportsPage] 데이터 수집 실패:", e);
@@ -177,6 +184,7 @@ function ReportsContent() {
     setYearMonth(currentYearMonth());
     setMonthlyStatus(null);
     setCollectSummary(null);
+    setCollectNotice(null);
     setErrorMessage(null);
   }
 
@@ -322,6 +330,7 @@ function ReportsContent() {
         {step === "done" && (
           <div className="card flex flex-col gap-4 p-6">
             <p className="rounded-md bg-emerald-50 p-3 text-sm text-emerald-800">수집에 성공했습니다.</p>
+            {collectNotice && <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-800">{collectNotice}</p>}
             {collectSummary && <p className="break-all text-xs text-gray-500">{collectSummary}</p>}
             <p className="text-xs text-gray-400">
               검수·수정(화면④)과 PPT 발행(화면⑤)은 아직 구현되지 않았습니다 — 수집된 원본 데이터는
