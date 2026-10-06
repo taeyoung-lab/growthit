@@ -89,7 +89,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     } catch (e) {
       if (e instanceof CmsAutomationError) {
         console.error(`[POST /api/brands/${params.id}/collect] ${e.step}`, e);
-        return NextResponse.json({ error: e.message, step: e.step }, { status: 502 });
+        // CMS가 정산 조회를 504로 끊은 경우(collect.ts의 엑셀 대체 경로도 못 쓴 경우) — 담당자가 바로
+        // 무엇을 해야 하는지 알 수 있게 대상 월과 CMS의 어느 메뉴를 보면 되는지 함께 안내합니다.
+        const hint =
+          e.step === "GATEWAY_TIMEOUT"
+            ? ` [안내] ${yearMonth} 정산 데이터를 자동으로 가져오지 못했습니다. 해당 브랜드 CMS의 "정산 > 매출 정산"에서 월조회(${yearMonth})로 검색한 뒤 "엑셀받기"로 받은 파일이 필요합니다(수기 업로드 기능은 준비 중입니다).`
+            : "";
+        return NextResponse.json({ error: e.message + hint, step: e.step }, { status: 502 });
       }
       throw e;
     }
@@ -107,6 +113,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       data: {
         dashboard: collected.dashboard,
         settlementsSales: collected.settlementsSales,
+        settlementSource: collected.settlementSource,
         targetGroupStats: collected.targetGroupStats,
         storeManage: collected.storeManage,
         memberStats: collected.memberStats,
