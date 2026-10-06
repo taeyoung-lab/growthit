@@ -40,6 +40,7 @@ export interface SalesSplit {
 export interface SalesRow {
   name: string; // 매장명 / 메뉴명 / "성별 연령대"
   storeId: number | null;
+  itemCd: string | null; // 메뉴 행만. 같은 이름의 메뉴가 여러 코드로 존재하므로 병합·구분은 이 코드로 합니다.
   all: SalesSplit;
   online: SalesSplit | null; // 온라인 전체(앱+배달플랫폼, 962001)
   offline: SalesSplit | null; // 오프라인(POS, 962002)
@@ -148,6 +149,7 @@ function toSalesRow(raw: unknown, name: string): SalesRow {
   return {
     name,
     storeId: typeof r.storeId === "number" ? r.storeId : null,
+    itemCd: typeof r.itemCd === "string" || typeof r.itemCd === "number" ? String(r.itemCd) : null,
     all: salesSplit(r),
     online: byTp(ONLINE),
     offline: byTp(OFFLINE),
@@ -261,14 +263,17 @@ async function fetchSalesItem(getJson: GetJson, cmsUrl: string, ck: string, star
       return [] as Record<string, unknown>[];
     }),
   ]);
-  const appByName = new Map<string, SalesSplit>();
-  for (const o of appRows) appByName.set(str(o.gubun), toAppSplit(o));
+  // 영커피에는 이름이 같은 메뉴가 서로 다른 itemCd로 존재(예: 부드러운(미디움) 아메리카노 100019/100786)해
+  // 이름으로 병합하면 앱 값이 중복 계상됩니다 — itemCd가 있으면 그걸로, 없으면 이름으로 짝지읍니다.
+  const itemKey = (o: Record<string, unknown>) => (o.itemCd != null && o.itemCd !== "" ? `cd:${String(o.itemCd)}` : `nm:${str(o.gubun)}`);
+  const appByKey = new Map<string, SalesSplit>();
+  for (const o of appRows) appByKey.set(itemKey(o), toAppSplit(o));
 
   const rows: SalesRow[] = [];
   let totalRow: SalesRow | null = null;
   for (const o of allRows) {
     const row = toSalesRow(o, str(o.gubun));
-    row.app = appByName.get(row.name) ?? null;
+    row.app = appByKey.get(itemKey(o)) ?? null;
     if (row.name === "전체") totalRow = row;
     else rows.push(row);
   }
