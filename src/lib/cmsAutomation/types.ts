@@ -21,6 +21,9 @@ export interface CmsCollectionResult {
   yearMonth: string; // YYYY-MM
   dashboard: unknown; // GET /api/dashboard (월조회) 원본 응답 — 매출·주문수·회원수 등
   settlementsSales: unknown; // GET /api/settlements/sales (월조회) 원본 응답 — 수수료 실측값
+  // 정산을 어느 경로로 받았는지 — JSON이 CMS 타임아웃으로 실패해 엑셀 다운로드로 대체한 달은
+  // "EXCEL_FALLBACK"(서비스이용료 세부 필드 없음, 마이너스 조정 값이 JSON과 다를 수 있음).
+  settlementSource: "JSON" | "EXCEL_FALLBACK";
   targetGroupStats: unknown; // GET /api/stats/targetGroup 원본 응답 — 회원 세그먼트
   // 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증 — 처갓집/샐러리아는
   // 미검증). 위 3개와 달리 조회 실패 시에도 전체 수집이 실패하지 않도록 null을 허용합니다
