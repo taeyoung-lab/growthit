@@ -275,7 +275,7 @@ export function buildReportModel(input: ReportInput): ReportModel {
     { item: "앱·전체 매출 구분(매장별 매출통계)", ok: !!basis, note: basis ? "수집됨" : "수집 실패 — 전체 매출·앱 비중을 계산할 수 없습니다" },
     { item: "온라인 채널별 매출(배달앱 비교)", ok: channels.length > 0, note: channels.length > 0 ? `${channels.length}개 채널` : "수집 실패" },
     { item: "메뉴·성별/연령 매출", ok: topItems.length > 0 && gender.length > 0, note: topItems.length > 0 ? "수집됨" : "수집 실패 또는 앱 매출 없음" },
-    { item: "주문 단위 집계(요일·시간대)", ok: !!ord && !ord.truncated, note: !ord ? "수집 실패" : ord.truncated ? "시간/페이지 상한으로 일부만 집계됨" : `${ord.orderCount.toLocaleString("ko-KR")}건 전체 집계` },
+    { item: "주문 단위 집계(요일·시간대)", ok: !!ord && (!ord.truncated || !!ord.sampled), note: !ord ? "수집 실패" : ord.sampled ? `월 ${(ord.totalCnt ?? 0).toLocaleString("ko-KR")}건 중 일부(${ord.pagesRead}페이지)를 읽어 전체로 늘린 추정치` : ord.truncated ? "시간/페이지 상한으로 일부만 집계됨" : `${ord.orderCount.toLocaleString("ko-KR")}건 전체 집계` },
     { item: "회원 구매 집계(빈도·재구매·파레토)", ok: !!members && !members.truncated, note: !members ? "집계 데이터 없음(수집 전 월이거나 저장 실패)" : `${members.months.join(", ")} 기준${members.truncated ? " (일부만 집계)" : ""}` },
     { item: "전월 비교 데이터", ok: !!prev, note: prev ? `${prevYm} 데이터로 계산` : `${prevYm} 데이터 없음 — CMS가 준 전월 대비 값을 대신 씁니다` },
     { item: "방문자·쿠폰·이벤트", ok: !!visitors && !!coupons && !!events, note: visitors && coupons && events ? "수집됨" : "일부 수집 실패" },
@@ -322,8 +322,9 @@ export function buildReportModel(input: ReportInput): ReportModel {
     stores: {
       counts: { total: storeList.length, normal, temporaryClosed: countSt("350002"), closed: countSt("350003"), preOpen: countSt("350004") },
       notAdopted,
-      appStores: withApp.length,
-      adoptionRate: normal > 0 ? round1((withApp.length / normal) * 100) : null,
+      // 매장이 많은 브랜드는 저장된 매장 행이 상·하위 일부뿐이라(salesStoreMeta), 개수는 수집 때 센 전체 값을 씁니다.
+      appStores: extras?.salesStoreMeta?.withAppStores ?? withApp.length,
+      adoptionRate: normal > 0 ? round1(((extras?.salesStoreMeta?.withAppStores ?? withApp.length) / normal) * 100) : null,
       newStores: brandSet ? { before15: num(brandSet.newStoreAgo15Day), after15: num(brandSet.newStoreAfter15Day) } : null,
       top: topSorted.slice(0, 10),
       bottom: [...withApp].sort((a, b) => a.appPay - b.appPay).slice(0, 5),
