@@ -78,6 +78,38 @@ function BrandsContent() {
     }
   }
 
+  // 백필에서 CMS 504로 건너뛴 달을 한 달씩 다시 수집(엑셀 대체 경로 포함). 한 달이 약 1분 걸립니다.
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryResult, setRetryResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+
+  async function runRetrySkipped(b: ReportBrand) {
+    setRetryingId(b.id);
+    setRetryResult(null);
+    try {
+      const r = await authedFetch(`/api/brands/${b.id}/backfill/retry-skipped`, { method: "POST" });
+      const left = r.remainingSkippedMonths?.length ?? 0;
+      if (!r.yearMonth) {
+        setRetryResult({ id: b.id, ok: true, message: "다시 수집할 건너뛴 달이 없습니다." });
+      } else if (r.ok) {
+        setRetryResult({
+          id: b.id,
+          ok: true,
+          message: `${r.yearMonth} 수집 완료${r.source === "EXCEL_FALLBACK" ? "(엑셀 다운로드 경로 — 서비스이용료 세부 내역 없음)" : ""}. ${
+            left > 0 ? `아직 ${left}개월 남아 있어 버튼을 다시 눌러주세요.` : "건너뛴 달을 모두 채웠습니다."
+          }`,
+        });
+      } else {
+        setRetryResult({ id: b.id, ok: false, message: `${r.yearMonth} 재수집 실패 — ${r.message ?? "원인 불명"}` });
+      }
+      await load();
+    } catch (e) {
+      console.error("[BrandsPage] 건너뛴 달 재수집 실패:", e);
+      setRetryResult({ id: b.id, ok: false, message: e instanceof Error ? e.message : "재수집에 실패했습니다." });
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   async function load() {
     if (!profile) return;
     try {
@@ -172,6 +204,11 @@ function BrandsContent() {
                     {collectResult.message}
                   </p>
                 )}
+                {retryResult && retryResult.id === b.id && (
+                  <p className={`mt-1 break-all text-xs ${retryResult.ok ? "text-emerald-700" : "text-red-600"}`}>
+                    {retryResult.message}
+                  </p>
+                )}
                 {backfillResult && backfillResult.id === b.id && (
                   <p className={`mt-1 break-all text-xs ${backfillResult.ok ? "text-emerald-700" : "text-red-600"}`}>
                     {backfillResult.message}
@@ -190,6 +227,15 @@ function BrandsContent() {
                       : b.backfill_completed_through
                         ? "백필 이어하기"
                         : "백필 시작"}
+                  </button>
+                )}
+                {b.has_saved_credentials && b.backfill_skipped_months && b.backfill_skipped_months.length > 0 && (
+                  <button
+                    className="btn btn-secondary text-xs"
+                    disabled={retryingId === b.id}
+                    onClick={() => runRetrySkipped(b)}
+                  >
+                    {retryingId === b.id ? "재수집 중(약 1분)..." : `건너뛴 달 다시 수집 (${b.backfill_skipped_months.length})`}
                   </button>
                 )}
                 {b.has_saved_credentials && (
