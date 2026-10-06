@@ -84,12 +84,20 @@ export function fitMonthlyDataSize(data: Record<string, unknown>): Record<string
   const extras = data.extras as Record<string, unknown> | null | undefined;
   if (!extras || size() <= MAX_DOC_BYTES) return data;
   const dropped: string[] = [];
+  // 2026-10-06: 매장 595개짜리 우지커피에서 salesStore를 통째로 비웠더니 [0]("전체" 합계 행)까지 사라져
+  // 전체 매출·앱결제액·앱 비중이 모두 비었습니다. 매출 지표는 [0]만 있으면 계산되므로, 이 두 항목은
+  // 먼저 "전체" 행 하나만 남기고 줄여 보고, 그래도 크면 그때 비웁니다(리포트 매장별 표만 빠짐).
   for (const key of ["couponsByStore", "salesItem", "salesStore"]) {
     if (size() <= MAX_DOC_BYTES) break;
-    if (extras[key] != null) {
-      extras[key] = null;
-      dropped.push(key);
+    const v = extras[key];
+    if (v == null) continue;
+    if ((key === "salesItem" || key === "salesStore") && Array.isArray(v) && v.length > 1) {
+      extras[key] = v.slice(0, 1);
+      dropped.push(`${key}(전체 행만 유지)`);
+      continue;
     }
+    extras[key] = null;
+    dropped.push(key);
   }
   if (dropped.length > 0) {
     extras.dropped = dropped;
