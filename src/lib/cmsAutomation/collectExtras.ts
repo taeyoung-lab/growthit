@@ -62,6 +62,10 @@ export interface OrderAggregate {
   memberCount: number;
   pagesRead: number;
   truncated: boolean; // 시간/페이지 상한에 걸려 일부만 읽었으면 true
+  // 월 주문이 상한(ORDER_MAX_PAGES×500건)을 넘는 대형 브랜드는 월 전체에 고르게 퍼진 일부 페이지만 읽고,
+  // 요일·시간대·유형 분포를 전체 주문 수(totalCnt)에 맞춰 늘려 "추정치"로 담습니다(sampled=true).
+  sampled?: boolean;
+  totalCnt?: number; // CMS가 알려준 월 전체 주문 건수(취소 포함)
 }
 
 export interface CmsExtras {
@@ -77,6 +81,11 @@ export interface CmsExtras {
   events: { eventNm: string; eventTpNm: string; startDt: string; endDt: string; state: string }[] | null;
   memberLevels: { date: string; total: number; counts: number[] }[] | null;
   orders: OrderAggregate | null;
+  // 매장이 많은 브랜드는 매장별 로우를 전부 저장하면 문서 한도(1MB)를 넘으므로 상·하위 매장만 남깁니다.
+  // 매장 수·앱 매출 발생 매장 수는 전체 기준으로 따로 담습니다.
+  salesStoreMeta?: { totalStores: number; withAppStores: number; kept: number } | null;
+  // 섹션별 수집 결과(성공/실패·소요시간·실패 사유). 데이터가 비었을 때 원인 파악용 — 개인정보 없음.
+  diag?: { label: string; ok: boolean; ms: number; error?: string }[];
 }
 
 // 회원별 월간 구매 집계 — Firestore는 배열 안의 배열을 못 쓰므로 [cusId, 주문수, 결제액]을 한 줄로 이어 붙입니다.
@@ -179,42 +188,106 @@ function withTimeout<T>(p: Promise<T>, label: string): Promise<T> {
 }
 
 // 세션 만료는 섹션 실패로 삼키지 않고 바깥(backfill.ts 등)이 구분해서 처리하도록 다시 던집니다.
-async function section<T>(label: string, fn: () => Promise<T>): Promise<T | null> {
+// 2026-10-06: 우지커피처럼 데이터가 비었을 때 "왜 비었는지"를 저장 데이터만으로 알 수 있도록, 섹션마다
+// 성공 여부·소요시간·실패 사유를 diag에 남깁니다(실패 사유는 CMS 응답 문구 앞부분만 — 개인정보 없음).
+type Diag = { label: string; ok: boolean; ms: number; error?: string };
+async function section<T>(label: string, fn: () => Promise<T>, diag?: Diag[]): Promise<T | null> {
+  const t0 = Date.now();
   try {
-    return await withTimeout(fn(), label);
+    const v = await withTimeout(fn(), label);
+    diag?.push({ label, ok: true, ms: Date.now() - t0 });
+    return v;
   } catch (e) {
     if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
-    console.warn(`[collectExtras] ${label} 수집 실패:`, e instanceof Error ? e.message : e);
+    const msg = e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 200) : String(e).slice(0, 200);
+    console.warn(`[collectExtras] ${label} 수집 실패:`, msg);
+    diag?.push({ label, ok: false, ms: Date.now() - t0, error: msg });
     return null;
   }
+}
+
+// 목록 API를 끝까지 읽습니다. CMS가 perPage 상한(예: 500)을 두면 첫 페이지만 받아 매장이 500개를 넘는
+// 브랜드(우지커피 595개, 처갓집 1,000개 이상)가 잘렸습니다 — totalCnt를 보고 나머지 페이지를 이어 받습니다.
+// pathFor(page)는 page 번호를 넣은 경로를 돌려줍니다. 한 번에 4페이지씩 병렬로 받고 MAX_LIST_PAGES에서 멈춥니다.
+const MAX_LIST_PAGES = 20;
+export async function fetchAllPages(
+  getJson: GetJson,
+  cmsUrl: string,
+  ck: string,
+  pathFor: (page: number) => string,
+  perPage: number
+): Promise<{ rows: unknown[]; totalCnt: number; first: Record<string, unknown> }> {
+  const first = rec(await getJson(cmsUrl, pathFor(1), ck));
+  const rows: unknown[] = [...arr(first.list)];
+  const totalCnt = num(first.totalCnt);
+  const lastPage = Math.min(Math.ceil(totalCnt / perPage), MAX_LIST_PAGES);
+  for (let p = 2; p <= lastPage; p += 4) {
+    const batch = Array.from({ length: Math.min(4, lastPage - p + 1) }, (_, i) => p + i);
+    const res = await Promise.all(batch.map((pg) => getJson(cmsUrl, pathFor(pg), ck)));
+    for (const r of res) rows.push(...arr(rec(r).list));
+  }
+  return { rows, totalCnt, first };
 }
 
 // ── 섹션별 수집 ──────────────────────────────────────────────────────────────
 
 const APP_FILTER = `salesTp=${ONLINE}&channel=${APP_CHANNEL}`;
 
+const STORE_KEEP_TOP = 100;
+const STORE_KEEP_BOTTOM = 20;
+const zeroSplit = (): SalesSplit => ({
+  total: { ord: 0, dc: 0, pay: 0 },
+  delivery: { ord: 0, dc: 0, pay: 0 },
+  pickup: { ord: 0, dc: 0, pay: 0 },
+  store: { ord: 0, dc: 0, pay: 0 },
+  reserve: { ord: 0, dc: 0, pay: 0 },
+});
+// 매장 한 줄을 합계(total)만 남긴 가벼운 행으로 줄입니다 — 리포트의 매장 표는 매장별 앱결제액·주문 수·
+// 전체 결제액만 쓰므로, 유형별(배달/픽업/매장/예약)·온라인/오프라인 세부는 "전체" 행에만 둡니다.
+function slimStoreRow(r: SalesRow): SalesRow {
+  const all = zeroSplit();
+  all.total = r.all.total;
+  const app = r.app ? zeroSplit() : null;
+  if (app && r.app) app.total = r.app.total;
+  return { name: r.name, storeId: r.storeId, itemCd: r.itemCd, all, online: null, offline: null, app };
+}
+
 async function fetchSalesStore(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
-  const base = `page=1&perPage=500&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m`;
+  const PER = 500;
   const tail = "isStoreAdmin=false&sortColumn=&sortDir=";
-  const [allJ, appJ] = await Promise.all([
-    getJson(cmsUrl, `/api/salesStats/store?${base}&salesTp=&channel=&${tail}`, ck),
+  const pathFor = (filter: string) => (page: number) =>
+    `/api/salesStats/store?page=${page}&perPage=${PER}&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&${filter}&${tail}`;
+  const [allR, appR] = await Promise.all([
+    fetchAllPages(getJson, cmsUrl, ck, pathFor("salesTp=&channel="), PER),
     // 앱(우리가잇다) 조회가 실패해도 전체 행은 살립니다 — app만 비어 있게 됩니다.
-    getJson(cmsUrl, `/api/salesStats/store?${base}&${APP_FILTER}&${tail}`, ck).catch((e) => {
+    fetchAllPages(getJson, cmsUrl, ck, pathFor(APP_FILTER), PER).catch((e) => {
       if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
       console.warn("[collectExtras] 매장별 앱(우리가잇다) 매출 수집 실패:", e instanceof Error ? e.message : e);
       return null;
     }),
   ]);
   const appByKey = new Map<string, SalesSplit>();
-  for (const r of arr(rec(appJ).list)) {
+  for (const r of arr(appR?.rows)) {
     const o = rec(r);
     appByKey.set(rowKey(typeof o.storeId === "number" ? o.storeId : null, str(o.gubun)), toAppSplit(o));
   }
-  return arr(rec(allJ).list).map((r) => {
+  const rows = allR.rows.map((r) => {
     const row = toSalesRow(r, str(rec(r).gubun));
     row.app = appByKey.get(rowKey(row.storeId, row.name)) ?? null;
     return row;
   });
+  const total = rows.find((r) => r.name === "전체") ?? null;
+  const stores = rows.filter((r) => r.name !== "전체");
+  const withApp = stores.filter((r) => (r.app?.total.pay ?? 0) > 0).sort((a, b) => (b.app?.total.pay ?? 0) - (a.app?.total.pay ?? 0));
+  // 앱 매출이 있는 매장은 상위 N + 하위 M만 남기고(합 120개 이하면 전부), 앱 매출 없는 매장은 개수만 셉니다.
+  const kept =
+    withApp.length > STORE_KEEP_TOP + STORE_KEEP_BOTTOM
+      ? [...withApp.slice(0, STORE_KEEP_TOP), ...withApp.slice(withApp.length - STORE_KEEP_BOTTOM)]
+      : withApp;
+  return {
+    rows: [...(total ? [total] : []), ...kept.map(slimStoreRow)],
+    meta: { totalStores: stores.length, withAppStores: withApp.length, kept: kept.length },
+  };
 }
 
 // 2026-10-06: 우지커피처럼 매장이 595개·월 주문이 78만 건인 대형 브랜드는 매장별 매출통계가 섹션 제한시간
@@ -236,7 +309,7 @@ async function fetchSalesTotalOnly(getJson: GetJson, cmsUrl: string, ck: string,
   const row = toSalesRow(first, str(rec(first).gubun) || "전체");
   const appFirst = arr(rec(appJ).list)[0];
   row.app = appFirst ? toAppSplit(appFirst) : null;
-  return [row];
+  return { rows: [row], meta: null as { totalStores: number; withAppStores: number; kept: number } | null };
 }
 
 // 온라인 안의 채널별(우리가잇다·배달의민족·쿠팡이츠…) 합계 — 전체 행의 salesStatsList가 채널 단위로 쪼개집니다.
@@ -344,10 +417,17 @@ async function fetchCoupons(getJson: GetJson, cmsUrl: string, ck: string, startD
   });
 }
 
+const COUPON_STORE_KEEP = 30;
 async function fetchCouponsByStore(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
-  const q = `page=1&perPage=500&key=store&keyword=&startDt=${startDt}&endDt=${endDt}&period=1m`;
-  const j = rec(await getJson(cmsUrl, `/api/stats/coupon?${q}`, ck));
-  return arr(j.list).map((r) => {
+  const PER = 500;
+  const { rows } = await fetchAllPages(
+    getJson,
+    cmsUrl,
+    ck,
+    (page) => `/api/stats/coupon?page=${page}&perPage=${PER}&key=store&keyword=&startDt=${startDt}&endDt=${endDt}&period=1m`,
+    PER
+  );
+  const all = rows.map((r) => {
     const o = rec(r);
     return {
       storeId: typeof o.storeId === "number" ? o.storeId : null, // null = 전체 합계 행
@@ -358,6 +438,10 @@ async function fetchCouponsByStore(getJson: GetJson, cmsUrl: string, ck: string,
       dcAmt: num(o.dcAmt),
     };
   });
+  // 리포트는 사용 건수 상위 5개 매장만 씁니다 — 합계 행 + 상위 매장 일부만 저장해 문서 크기를 줄입니다.
+  const total = all.filter((c) => c.storeId === null);
+  const stores = all.filter((c) => c.storeId !== null).sort((x, y) => y.used - x.used || y.issued - x.issued);
+  return [...total, ...stores.slice(0, COUPON_STORE_KEEP)];
 }
 
 async function fetchStoreCoupons(getJson: GetJson, cmsUrl: string, ck: string) {
@@ -394,8 +478,25 @@ async function fetchMemberLevels(getJson: GetJson, cmsUrl: string, ck: string, s
   });
 }
 
-// 주문 목록 전체(월 2만~수만 건)를 500건씩 읽어 서버 메모리에서만 집계합니다. 고객 이름·로그인ID는 쓰지
-// 않고 버립니다. 시간/페이지 상한에 걸리면 읽은 만큼만으로 집계하고 truncated=true로 표시합니다.
+// 주문 목록을 500건씩 읽어 서버 메모리에서만 집계합니다. 고객 이름·로그인ID는 쓰지 않고 버립니다.
+// 2026-10-06 대형 브랜드(우지커피 월 78만 건) 대응:
+//  - 읽기 순서를 "최신순 연속"이 아니라 월 전체에 고르게 퍼진 페이지 순서로 바꿨습니다. 시간 상한에 걸려
+//    일부만 읽어도 월말 며칠에 쏠리지 않아 요일·시간대 분포가 한쪽으로 치우치지 않습니다.
+//  - 상한(시간·페이지)에 걸리면 읽은 만큼으로 집계해 전체 주문 수에 맞춰 비율로 늘린 추정치를 돌려줍니다
+//    (sampled=true). 예전에는 섹션 제한시간(90초)을 넘기면 읽은 것까지 통째로 버려 null이 됐습니다.
+//  - 회원별 구매 집계(재구매율 등)는 일부 주문만으로는 맞지 않으므로 truncated=true로 표시해 둡니다.
+function spreadOrder(totalPages: number): number[] {
+  // 2..totalPages를 간격(stride)으로 건너뛰며 돌아 앞쪽부터 읽어도 월 전체를 고르게 덮습니다.
+  const n = totalPages - 1;
+  if (n <= 0) return [];
+  let stride = Math.max(1, Math.round(n * 0.618));
+  const gcd = (x: number, y: number): number => (y === 0 ? x : gcd(y, x % y));
+  while (gcd(stride, n) !== 1) stride += 1;
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) out.push(2 + ((i * stride) % n));
+  return out;
+}
+
 async function fetchOrders(
   getJson: GetJson,
   cmsUrl: string,
@@ -408,6 +509,7 @@ async function fetchOrders(
     `&startDt=${startDt}+00:00&endDt=${endDt}+23:59&orderGb=&payTp=&cusLoginId=&isStoreAdmin=false&orderStType=list`;
 
   const startedAt = Date.now();
+  const deadline = startedAt + ORDER_TIME_BUDGET_MS;
   const agg: OrderAggregate = {
     orderCount: 0,
     amount: 0,
@@ -421,7 +523,9 @@ async function fetchOrders(
   };
   const members = new Map<number, [number, number]>();
 
+  let rowsRead = 0; // 취소 포함, 실제로 받은 주문 행 수 — 늘리는 비율 계산용
   const consume = (list: unknown[]) => {
+    rowsRead += list.length;
     for (const raw of list) {
       const o = rec(raw);
       if (str(o.orderStNm) === "주문취소") continue;
@@ -451,24 +555,48 @@ async function fetchOrders(
   const first = rec(await getJson(cmsUrl, pageUrl(1), ck));
   consume(arr(first.list));
   agg.pagesRead = 1;
-  const totalPages = Math.min(Math.ceil(num(first.totalCnt) / ORDER_PAGE_SIZE), ORDER_MAX_PAGES);
-  if (Math.ceil(num(first.totalCnt) / ORDER_PAGE_SIZE) > ORDER_MAX_PAGES) agg.truncated = true;
+  const totalCnt = num(first.totalCnt);
+  agg.totalCnt = totalCnt;
+  const wantPages = Math.ceil(totalCnt / ORDER_PAGE_SIZE);
+  const totalPages = Math.min(wantPages, ORDER_MAX_PAGES);
+  if (wantPages > ORDER_MAX_PAGES) agg.truncated = true;
 
-  const queue: number[] = [];
-  for (let p = 2; p <= totalPages; p++) queue.push(p);
+  const queue = spreadOrder(totalPages);
   const worker = async () => {
     while (queue.length > 0) {
-      if (Date.now() - startedAt > ORDER_TIME_BUDGET_MS) {
+      if (Date.now() > deadline) {
         agg.truncated = true;
         return;
       }
       const p = queue.shift()!;
-      const j = rec(await getJson(cmsUrl, pageUrl(p), ck));
-      consume(arr(j.list));
-      agg.pagesRead += 1;
+      try {
+        consume(arr(rec(await getJson(cmsUrl, pageUrl(p), ck)).list));
+        agg.pagesRead += 1;
+      } catch (e) {
+        if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+        agg.truncated = true; // 한 페이지 실패로 지금까지 읽은 것을 버리지 않습니다
+      }
     }
   };
-  await Promise.all(Array.from({ length: ORDER_CONCURRENCY }, () => worker()));
+  // 마감 시각 + 여유 8초까지만 기다립니다 — 느린 페이지 하나가 섹션 제한시간(90초)을 넘겨 전부 버려지는 것을 막습니다.
+  await Promise.race([
+    Promise.all(Array.from({ length: ORDER_CONCURRENCY }, () => worker())),
+    new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now()) + 8_000)),
+  ]);
+  if (queue.length > 0) agg.truncated = true;
+
+  // 일부만 읽었으면 요일·시간대·유형 분포를 월 전체 주문 수에 맞춰 늘립니다(추정치).
+  if (agg.truncated && agg.orderCount > 0 && totalCnt > agg.orderCount) {
+    const k = totalCnt / Math.max(1, rowsRead);
+    const scale = (v: number) => Math.round(v * k);
+    agg.sampled = true;
+    agg.orderCount = scale(agg.orderCount);
+    agg.amount = scale(agg.amount);
+    agg.byDow = agg.byDow.map(scale);
+    agg.byDowAmount = agg.byDowAmount.map(scale);
+    agg.byHour = agg.byHour.map(scale);
+    for (const key of Object.keys(agg.byChannel)) agg.byChannel[key] = scale(agg.byChannel[key]);
+  }
 
   agg.memberCount = members.size;
   const flat: number[] = [];
@@ -487,8 +615,9 @@ export async function collectExtras(
   endDt: string
 ): Promise<ExtrasResult> {
   const ck = cookieHeader;
+  const diag: Diag[] = [];
   const [
-    salesStore,
+    salesStoreResult,
     salesItem,
     salesGenderAge,
     onlineChannels,
@@ -501,25 +630,27 @@ export async function collectExtras(
     memberLevels,
     ordersResult,
   ] = await Promise.all([
-    section("매장별 매출통계", () => fetchSalesStore(getJson, cmsUrl, ck, startDt, endDt)).then(
-      (full) => full ?? section("전체 매출 합계(매장별 조회 실패 대체)", () => fetchSalesTotalOnly(getJson, cmsUrl, ck, startDt, endDt))
+    section("매장별 매출통계", () => fetchSalesStore(getJson, cmsUrl, ck, startDt, endDt), diag).then(
+      (full) =>
+        full ?? section("전체 매출 합계(매장별 조회 실패 대체)", () => fetchSalesTotalOnly(getJson, cmsUrl, ck, startDt, endDt), diag)
     ),
-    section("메뉴별 매출통계", () => fetchSalesItem(getJson, cmsUrl, ck, startDt, endDt)),
-    section("성별/연령별 매출통계", () => fetchGenderAge(getJson, cmsUrl, ck, startDt, endDt)),
-    section("온라인 채널별 매출", () => fetchOnlineChannels(getJson, cmsUrl, ck, startDt, endDt)),
-    section("일자별 매장 매출(브랜드 요약)", () => fetchDailyBrandSet(getJson, cmsUrl, ck, yearMonth, startDt, endDt)),
-    section("방문자 통계", () => fetchVisitors(getJson, cmsUrl, ck, startDt, endDt)),
-    section("쿠폰 통계", () => fetchCoupons(getJson, cmsUrl, ck, startDt, endDt)),
-    section("매장별 쿠폰 통계", () => fetchCouponsByStore(getJson, cmsUrl, ck, startDt, endDt)),
-    section("가맹점 쿠폰관리", () => fetchStoreCoupons(getJson, cmsUrl, ck)),
-    section("이벤트", () => fetchEvents(getJson, cmsUrl, ck)),
-    section("회원등급현황", () => fetchMemberLevels(getJson, cmsUrl, ck, startDt, endDt)),
-    section("주문조회 집계", () => fetchOrders(getJson, cmsUrl, ck, startDt, endDt)),
+    section("메뉴별 매출통계", () => fetchSalesItem(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("성별/연령별 매출통계", () => fetchGenderAge(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("온라인 채널별 매출", () => fetchOnlineChannels(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("일자별 매장 매출(브랜드 요약)", () => fetchDailyBrandSet(getJson, cmsUrl, ck, yearMonth, startDt, endDt), diag),
+    section("방문자 통계", () => fetchVisitors(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("쿠폰 통계", () => fetchCoupons(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("매장별 쿠폰 통계", () => fetchCouponsByStore(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("가맹점 쿠폰관리", () => fetchStoreCoupons(getJson, cmsUrl, ck), diag),
+    section("이벤트", () => fetchEvents(getJson, cmsUrl, ck), diag),
+    section("회원등급현황", () => fetchMemberLevels(getJson, cmsUrl, ck, startDt, endDt), diag),
+    section("주문조회 집계", () => fetchOrders(getJson, cmsUrl, ck, startDt, endDt), diag),
   ]);
 
   return {
     extras: {
-      salesStore,
+      salesStore: salesStoreResult ? salesStoreResult.rows : null,
+      salesStoreMeta: salesStoreResult ? salesStoreResult.meta : null,
       salesItem,
       salesGenderAge,
       onlineChannels,
@@ -531,6 +662,7 @@ export async function collectExtras(
       events,
       memberLevels,
       orders: ordersResult ? ordersResult.agg : null,
+      diag,
     },
     memberOrderAgg: ordersResult ? ordersResult.members : null,
   };
