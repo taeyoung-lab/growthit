@@ -17,6 +17,13 @@ service cloud.firestore {
 // 5. Cloud Functions를 쓰지 않으므로(Spark 요금제 유지), meetings.member_uids는
 //    permissions 서브컬렉션에 쓰는 모든 서버 코드가 직접 함께 갱신해야 합니다
 //    (src/lib/firebase/meetingAccess.ts 헬퍼 사용).
+// 6. 2026-10-02: 그로스잇 브랜드 정기 성과 리포트 자동화(brands/brandCredentials/
+//    brandMonthlyData/reportPublishHistory)에 대한 규칙이 이 파일에 아예 없던 공백을 메움 —
+//    서버(Admin SDK)는 규칙과 무관하게 항상 전체 접근 가능하므로, 지금까지 /api/brands 계열
+//    라우트(POST/PATCH/collect/backfill/monthly-data)는 이 공백과 무관하게 정상 동작해왔습니다.
+//    다만 클라이언트 SDK 직접 접근(브랜드 관리 화면의 목록 조회·소프트 삭제 토글 등)은 이 공백
+//    기간 동안 실제 배포 콘솔에 별도로 입력된 규칙에 의존하고 있었을 수 있어, 아래 6번 섹션으로
+//    명시적으로 정리합니다.
 // ============================================================================
 
 function isSignedIn() {
@@ -201,6 +208,71 @@ match /databases/{database}/documents {
 
   // ---- 공유 접근 로그: 서버 전용 ----
   match /meetingShareAccessLogs/{logId} {
+    allow read, write: if false;
+  }
+
+  // ---- 그로스잇 브랜드 정기 성과 리포트 자동화 (Monthly Report 발행 메뉴) ----
+  // 2026-10-02 추가: 지금까지 이 섹션 자체가 파일에 없었습니다(생성·수정은 전부 Admin SDK를 쓰는
+  // /api/brands 계열 라우트를 거쳐왔기 때문에 그동안은 문제가 드러나지 않았음 — Admin SDK는 이
+  // 규칙 파일과 무관하게 항상 전체 접근 가능합니다). 아래는 클라이언트 SDK가 직접 건드리는
+  // 부분(brands/page.tsx·reports/page.tsx의 목록 조회, 소프트 삭제 토글)에 맞춰 최소 권한만
+  // 명시적으로 허용합니다.
+
+  // brands: 같은 조직이면 누구나 조회 가능(담당자가 누구든 Monthly Report 발행 화면에서 전체
+  // 브랜드를 봐야 함 — 2026-10-01 결정: "계정이 있으면 어디서든 사용 가능"). 생성과 대부분의 수정
+  // (회사명·CMS URL·서비스 오픈일·CMS 계정 등)은 서버(POST/PATCH /api/brands)만 할 수 있고,
+  // 클라이언트 직접 쓰기는 brands/page.tsx의 "삭제"(=비활성화) 버튼이 쓰는 brand_status 토글
+  // 한 가지로만 한정합니다 — 그 외 필드를 같이 바꾸려는 update는 거부되고, 실제 전체 수정은
+  // PATCH /api/brands(권한 검증 포함)로만 가능합니다.
+  // 2026-10-02 수정: read를 sameOrg()로 뒀다가 brands/page.tsx·reports/page.tsx의 목록 조회
+  // (getDocs(query(... where organization_id ==)))가 "Missing or insufficient permissions"로
+  // 실패하는 것을 라이브로 확인 — organizations 규칙 주석에 이미 기록돼 있던 것과 동일한 버그
+  // (중첩 커스텀 함수로 get()을 여러 단계 거치면 단일 문서 get은 멀쩡해도 list/쿼리 규칙 평가에서는
+  // 실패함). departments/users/projects와 동일하게 get()을 인라인으로 직접 써서 우회합니다.
+  // update는 단일 문서 쓰기라 이 버그의 영향을 받지 않아 sameOrg()/isSuperAdmin()을 그대로 둡니다.
+  match /brands/{brandId} {
+    allow read: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id;
+    allow create: if false;
+    allow update: if sameOrg(resource.data.organization_id) &&
+      (isSuperAdmin() || resource.data.created_by == request.auth.uid) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['brand_status', 'updated_at']);
+    allow delete: if false; // 실제 삭제 없음 — brand_status로만 소프트 삭제
+  }
+
+  // CMS 로그인 자격증명: 비밀번호·전화번호 인증 고정값을 암호화해 저장하지만, 그 암호화된 값조차
+  // 클라이언트에 내려줄 이유가 없어 읽기·쓰기 전부 차단합니다. 복호화는 서버(collect.ts/backfill.ts)
+  // 에서만 일어납니다(src/app/api/brands/route.ts 상단 주석 참고).
+  match /brandCredentials/{brandId} {
+    allow read, write: if false;
+  }
+
+  // 브랜드×연월 단위로 CMS에서 수집한 원본 집계값(data) + 담당자가 화면④에서 고친 값(overrides).
+  // 같은 조직이면 조회는 가능하게 열어두되(개인정보 없이 집계값 위주 — 전화번호 등은 추후 해시로만
+  // 저장 예정), 쓰기는 전부 서버(POST /api/brands/{id}/collect, /api/brands/{id}/backfill)만
+  // 하도록 막습니다. GET /api/brands/{id}/monthly-data도 서버(Admin SDK)에서 읽으므로 이 규칙과
+  // 무관하게 동작합니다.
+  // read는 brands와 동일한 이유로 sameOrg() 대신 get() 인라인 — 지금은 클라이언트에서 직접
+  // 목록 조회하는 곳이 없지만(전부 서버 경유), 화면④ 구현 시 목록/쿼리로 바로 읽게 되더라도
+  // 같은 "Missing or insufficient permissions" 버그를 다시 밟지 않도록 미리 맞춰둡니다.
+  match /brandMonthlyData/{docId} {
+    allow read: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id;
+    allow write: if false;
+  }
+
+  // 화면⑤ "발행 이력" — PPT 생성까지 완료된 건만 서버가 기록합니다(화면⑤ 구현 전까지는 아직
+  // 쓰는 코드가 없음). read는 위와 동일한 이유로 get() 인라인.
+  match /reportPublishHistory/{historyId} {
+    allow read: if isSignedIn() &&
+      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organization_id == resource.data.organization_id;
+    allow write: if false;
+  }
+
+  // 회원별(고객번호) 월 주문 수·결제액 집계 청크 — 서버(collect/backfill/리포트 조회)만 읽고 씁니다.
+  // 규칙이 없어도 기본값이 "차단"이라 지금도 막혀 있지만, 나중에 누군가 전체 허용 규칙을 추가해도
+  // 이 컬렉션이 노출되지 않도록 명시해 둡니다(2026-10-06).
+  match /brandMonthlyMembers/{docId} {
     allow read, write: if false;
   }
 }
