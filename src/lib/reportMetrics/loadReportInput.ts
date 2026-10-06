@@ -1,4 +1,3 @@
-
 // 서버 전용: Firestore에 저장된 월 데이터·회원 집계·담당자 입력을 모아 ReportInput을 만듭니다.
 // 화면④ 미리보기(GET)와 PPT 발행(POST)이 같은 입력을 쓰도록 한곳에 둡니다.
 
@@ -39,7 +38,7 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
   for (const ym of [monthsBefore(yearMonth, 2), monthsBefore(yearMonth, 1), yearMonth]) {
     try {
       const agg = await loadMemberAggregates(db, brandId, ym);
-      if (agg) memberMonths.push({ yearMonth: ym, map: agg.members, truncated: agg.truncated });
+      if (agg && agg.members.size > 0) memberMonths.push({ yearMonth: ym, map: agg.members, truncated: agg.truncated });
     } catch (e) {
       console.warn(`[loadReportInput] ${ym} 회원 집계 읽기 실패:`, e instanceof Error ? e.message : e);
     }
