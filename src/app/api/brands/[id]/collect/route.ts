@@ -148,7 +148,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
     console.error(`[POST /api/brands/${params.id}/collect]`, e);
-    return NextResponse.json({ error: "데이터 수집에 실패했습니다." }, { status: 500 });
+    // 로그인한 담당자에게만 보이는 화면이므로, 원인 파악을 위해 짧게 잘라서 함께 내려줍니다.
+    const detail = e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 240) : "";
+    return NextResponse.json({ error: "데이터 수집에 실패했습니다." + (detail ? ` (원인: ${detail})` : "") }, { status: 500 });
   }
 }
 
