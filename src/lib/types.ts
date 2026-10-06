@@ -105,6 +105,20 @@ export interface Project {
 // 저장돼 있는지" 여부만 비밀값 없이 보여주는 has_saved_credentials 플래그만 둡니다.
 
 export type ReportBrandStatus = "ACTIVE" | "INACTIVE";
+
+// 2026-10-05: 화면④ "채널 효율 비교"의 수수료 키인값 기본값(설계 문서 결정사항 "수수료 키인값 입력 방식 —
+// 브랜드 설정에 기본값 저장, 변경 시에만 수정"). 값은 모두 퍼센트(%) 단위 숫자(예: 1.5 = 1.5%)이며
+// 비밀값이 아니라 brands 문서에 그대로 둡니다. null이면 "아직 입력 안 함"입니다.
+export interface BrandFeeDefaults {
+  delivery_rate: number | null; // 그로스잇 배달 주문 수수료율(%)
+  pickup_rate: number | null; // 그로스잇 픽업 주문 수수료율(%)
+  // 배달앱 수수료 벤치마크(%) — 업계 평균 10.8%가 기본값이라, 브랜드가 따로 정하지 않으면 null로 두고
+  // 화면④가 DEFAULT_BENCHMARK_FEE_RATE를 대신 채웁니다.
+  benchmark_rate: number | null;
+}
+
+// 설계 문서 화면④: "배달앱 수수료 벤치마크 입력란 — 기본값 10.8%로 미리 채워지고 수정 가능".
+export const DEFAULT_BENCHMARK_FEE_RATE = 10.8;
 export type BackfillStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
 export interface ReportBrand {
@@ -138,6 +152,8 @@ export interface ReportBrand {
   // CMS 쪽과 별도로 확인/재수집할 수 있게 합니다. 백필 미대상 브랜드이거나 아직 건너뛴 달이
   // 없으면 빈 배열.
   backfill_skipped_months: string[];
+  // 그로스잇 수수료 기본값(%). 2026-10-05 이전에 만든 브랜드는 필드 자체가 없을 수 있어 optional입니다.
+  fee_defaults?: BrandFeeDefaults;
   // 가장 최근으로 "발행"(PPT 생성)까지 완료된 연월(YYYY-MM) — 화면④의 전월대비(MoM) 자동 조회,
   // 화면①의 "기존 발행 이력 유무" 표시에 사용. 백필로만 채워진 월은 포함하지 않습니다.
   last_published_month: string | null;
