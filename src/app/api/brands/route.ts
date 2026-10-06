@@ -76,12 +76,22 @@ function validateNewPhoneVerification(body: Partial<BrandRequestBody>): string |
   return null;
 }
 
+// 신규 등록 시 그로스잇 수수료율(배달·픽업)은 필수 — 브랜드마다 계약 조건이 달라 리포트의 수수료 절감액
+// 계산에 꼭 필요합니다. 수수료가 없으면 0을 입력합니다. (수정 시에는 기존 브랜드 호환을 위해 선택 입력)
+function validateNewFeeRates(body: Partial<BrandRequestBody>): string | null {
+  const ok = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  if (!ok(body.fee_delivery_rate) || !ok(body.fee_pickup_rate)) {
+    return "그로스잇 배달·픽업 수수료율은 필수입니다(수수료가 없으면 0을 입력해주세요).";
+  }
+  return null;
+}
+
 // 생성: 로그인한 사용자 누구나(등록자 = 담당자, firestore.rules의 /brands create 규칙과 동일 원칙).
 export async function POST(req: NextRequest) {
   try {
     const { uid, profile } = await requireUser(req);
     const body = (await req.json()) as Partial<BrandRequestBody>;
-    const invalid = validate(body) ?? validateNewPhoneVerification(body);
+    const invalid = validate(body) ?? validateNewPhoneVerification(body) ?? validateNewFeeRates(body);
     if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
 
     const now = Date.now();
