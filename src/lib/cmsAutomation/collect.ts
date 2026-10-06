@@ -1,5 +1,7 @@
 import { CmsAutomationError } from "./types";
 import type { CmsCollectionResult, CmsSession } from "./types";
+import { parseFirstSheetRows } from "./xlsxLite";
+import { settlementsRowsToJson } from "./settlementsExcel";
 
 // 로그인 이후 데이터 수집 — 화면을 다시 띄우지 않고, 로그인으로 얻은 쿠키를 그대로 실어 CMS가
 // 내부적으로 쓰는 JSON API를 직접 호출합니다(login.ts 상단 주석 참고 — 2026-10-01 청자다방
@@ -213,6 +215,76 @@ async function getSettlements(
   return getJson(cmsUrl, `/api/settlements/sales?${query}`, cookieHeader);
 }
 
+// 2026-10-05: 정산 JSON API(/api/settlements/sales)가 CMS 게이트웨이 타임아웃(504)으로 실패하는
+// 달(브래덴코 2026-06·2026-09 등 — 저희 타임아웃과 무관하게 CMS가 60초에 끊음)의 대체 경로.
+// 같은 화면의 "엑셀받기" 버튼이 호출하는 POST /api/settlements/sales/download는 같은 달을 0.1~0.4초에
+// xlsx로 돌려주는 것을 브래덴코(2025-11·2026-03·2026-04·2026-06·2026-09)·영커피(2026-09)에서
+// 직접 확인했습니다. 다만 JSON과 100% 같지는 않고(영커피 2026-09 기준 매장 101개 중 2개가 마이너스
+// 조정 때문에 다름), 서비스이용료 세부 내역 필드가 없어서 — JSON이 실패했을 때만 쓰는 대체 경로로
+// 한정하고, 어느 경로로 받았는지는 settlementSource로 저장 데이터에 남깁니다.
+// 표준형(searchTp=month 방식) 브랜드에서만 검증했으므로 샐러리아·처갓집 같은 변형 브랜드에는
+// 적용하지 않습니다(getSettlementsWithFallback 참고).
+async function getSettlementsExcel(cmsUrl: string, cookieHeader: string, endDt: string): Promise<unknown> {
+  const url = new URL("/api/settlements/sales/download", cmsUrl).toString();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CMS_FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { Cookie: cookieHeader, "Content-Type": "application/json", Accept: "*/*" },
+      body: JSON.stringify({
+        url: "settlements/sales/download",
+        searchTp: "month",
+        storeNm: "",
+        storeId: "",
+        orderGb: "",
+        searchOrderGb: "",
+        searchDt: endDt,
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new CmsAutomationError(`CMS 세션이 만료됐거나 무효합니다 (${res.status}) — ${url}`, "SESSION_EXPIRED");
+  }
+  if (!res.ok) throw new Error(`CMS 정산 엑셀 다운로드 실패 (${res.status}) — ${url}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  return settlementsRowsToJson(parseFirstSheetRows(buf));
+}
+
+function isCmsTimeout(err: unknown): boolean {
+  if (err instanceof CmsAutomationError) return err.step === "GATEWAY_TIMEOUT";
+  // getJson이 우리 쪽 요청 타임아웃(CMS_FETCH_TIMEOUT_MS)에 걸렸을 때 던지는 일반 Error.
+  return err instanceof Error && err.message.includes("응답 지연");
+}
+
+async function getSettlementsWithFallback(
+  variant: SettlementVariant,
+  cmsUrl: string,
+  cookieHeader: string,
+  startDt: string,
+  endDt: string
+): Promise<{ data: unknown; source: "JSON" | "EXCEL_FALLBACK" }> {
+  try {
+    return { data: await getSettlements(variant, cmsUrl, cookieHeader, startDt, endDt), source: "JSON" };
+  } catch (err) {
+    // 세션 만료는 대체 경로가 의미 없고, 표준형 외 변형은 엑셀 경로가 검증되지 않았습니다 —
+    // 원래 에러를 그대로 던져 backfill.ts의 기존 처리(그 달 건너뛰기 등)가 유지되게 합니다.
+    if (variant !== "standard" || !isCmsTimeout(err)) throw err;
+    try {
+      const data = await getSettlementsExcel(cmsUrl, cookieHeader, endDt);
+      console.warn(`[collectMonthlyData] 정산 JSON이 CMS 타임아웃으로 실패해 엑셀 다운로드로 대체했습니다(${cmsUrl}, ${endDt}).`);
+      return { data, source: "EXCEL_FALLBACK" };
+    } catch (fallbackErr) {
+      console.warn(`[collectMonthlyData] 정산 엑셀 대체 경로도 실패(${cmsUrl}, ${endDt}):`, fallbackErr);
+      throw err;
+    }
+  }
+}
+
 // 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증 — 처갓집/샐러리아는
 // 아직 동일 경로에 이 엔드포인트가 있는지 라이브 확인 전). perPage=500으로 브랜드의 전체 매장을
 // 한 번에 받아옵니다(브래덴코 91개 매장 기준 정상 동작 확인). storeSt(매장 상태 코드)는
@@ -262,7 +334,7 @@ export async function collectMonthlyData(
   const [dashboardResult, settlementsResult, targetGroupResult, storeManageResult, memberStatsResult] =
     await Promise.allSettled([
       getDashboard(variant.dashboard, cmsUrl, cookieHeader, yearMonth, endDt),
-      getSettlements(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
+      getSettlementsWithFallback(variant.settlement, cmsUrl, cookieHeader, startDt, endDt),
       getJson(cmsUrl, `/api/stats/targetGroup?${targetGroupQuery}`, cookieHeader),
       getStoreManage(cmsUrl, cookieHeader),
       getMemberStats(cmsUrl, cookieHeader, endDt),
@@ -285,7 +357,8 @@ export async function collectMonthlyData(
   return {
     yearMonth,
     dashboard: dashboardResult.value,
-    settlementsSales: settlementsResult.value,
+    settlementsSales: settlementsResult.value.data,
+    settlementSource: settlementsResult.value.source,
     targetGroupStats: targetGroupResult.value,
     storeManage,
     memberStats,
