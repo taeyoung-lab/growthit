@@ -1,4 +1,3 @@
-
 // 수집 데이터 + 담당자 입력 → 리포트 8개 섹션 값(ReportModel). 순수 함수입니다.
 // 매출 기준(전체=온라인+오프라인, 그로스잇 매출액=우리가잇다 앱결제액, 앱 비중=앱÷전체)은 salesBasis.ts의
 // 담당자 확정 정의를 그대로 따릅니다. 서비스이용료 세부 내역은 리포트에서 쓰지 않습니다(2026-10-05 결정).
@@ -14,8 +13,8 @@ import { arr, num, numOrNull, pctChange, prevMonth, rec, round1, round2, str } f
 const DOW = ["일", "월", "화", "수", "목", "금", "토"];
 
 function pick(override: number | null | undefined, fallback: number | null | undefined): number | null {
-  if (override !== undefined) return override;
-  return fallback ?? null;
+  // 비워 둔 값(null)은 "입력 없음"이므로 브랜드 기본값을 씁니다. 수수료 없음은 0으로 입력합니다.
+  return override ?? fallback ?? null;
 }
 
 interface FeeCalc {
