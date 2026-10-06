@@ -211,7 +211,9 @@ export interface ReportPublishHistory {
   organization_id: ID;
   brand_id: ID;
   year_month: string; // YYYY-MM — 당월·과거월 재발행 모두 가능(화면① 참고)
-  ppt_storage_path: string;
+  // PPT는 저장소에 올리지 않고 발행 시점에 바로 내려받는 방식(2026-10-01 "다운로드만 제공" 결정)이라 null입니다.
+  ppt_storage_path: string | null;
+  file_name?: string;
   published_by: ID;
   published_at: number;
 }
