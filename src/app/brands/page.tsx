@@ -352,6 +352,10 @@ function BrandModal({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!profile || !companyName.trim() || !brandName.trim() || !cmsUrl.trim() || !managerName.trim()) return;
+    if (isCreate && (feeDeliveryRate.trim() === "" || feePickupRate.trim() === "")) {
+      setError("그로스잇 배달·픽업 수수료율을 입력해주세요(수수료가 없으면 0).");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -464,7 +468,8 @@ function BrandModal({
             </p>
           </div>
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">그로스잇 수수료 기본값 (%, 선택)</label>
+            <label className="mb-1 block text-xs font-medium text-gray-600">그로스잇 수수료율 (%){isCreate ? <span className="text-red-500"> *필수</span> : ", 기본값"}
+            </label>
             <div className="flex gap-2">
               <input
                 className="input w-full"
@@ -473,6 +478,7 @@ function BrandModal({
                 max={100}
                 step="0.01"
                 placeholder="배달 수수료율"
+                required={isCreate}
                 value={feeDeliveryRate}
                 onChange={(e) => setFeeDeliveryRate(e.target.value)}
               />
@@ -483,6 +489,7 @@ function BrandModal({
                 max={100}
                 step="0.01"
                 placeholder="픽업 수수료율"
+                required={isCreate}
                 value={feePickupRate}
                 onChange={(e) => setFeePickupRate(e.target.value)}
               />
@@ -498,7 +505,7 @@ function BrandModal({
               onChange={(e) => setFeeBenchmarkRate(e.target.value)}
             />
             <p className="mt-1 text-[11px] text-gray-400">
-              리포트 발행 화면④의 채널 효율 비교(수수료 절감액)에 미리 채워지는 값이며, 발행할 때 그 달에만 바꿀 수도 있습니다.
+              브랜드별 계약 조건에 맞게 입력하세요(수수료가 없으면 0). 리포트 발행 화면④의 수수료 절감액 계산에 미리 채워지며, 발행할 때 그 달에만 바꿀 수도 있습니다.
             </p>
           </div>
           <div>
