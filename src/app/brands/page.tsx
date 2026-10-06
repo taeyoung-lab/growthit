@@ -337,6 +337,10 @@ function BrandModal({
   const [managerName, setManagerName] = useState(brand?.manager_name ?? profile?.user_name ?? "");
   const [phoneVerification, setPhoneVerification] = useState(brand?.phone_verification_required ?? false);
   const [serviceOpenDate, setServiceOpenDate] = useState(brand?.service_open_date ?? "");
+  // 그로스잇 수수료 기본값(%) — 화면④ 수수료 입력란에 미리 채워지는 값(빈칸 = 미입력).
+  const [feeDeliveryRate, setFeeDeliveryRate] = useState(brand?.fee_defaults?.delivery_rate?.toString() ?? "");
+  const [feePickupRate, setFeePickupRate] = useState(brand?.fee_defaults?.pickup_rate?.toString() ?? "");
+  const [feeBenchmarkRate, setFeeBenchmarkRate] = useState(brand?.fee_defaults?.benchmark_rate?.toString() ?? "");
   const [cmsUsername, setCmsUsername] = useState("");
   const [cmsPassword, setCmsPassword] = useState("");
   const [fixedVerificationCode, setFixedVerificationCode] = useState("");
@@ -362,6 +366,10 @@ function BrandModal({
         cms_username: cmsUsername.trim() || null,
         cms_password: cmsPassword || null,
         fixed_verification_code: fixedVerificationCode.trim() || null,
+        // 빈칸 → null(미입력), 숫자가 아니면 서버 검증에서 막힙니다.
+        fee_delivery_rate: feeDeliveryRate.trim() === "" ? null : Number(feeDeliveryRate),
+        fee_pickup_rate: feePickupRate.trim() === "" ? null : Number(feePickupRate),
+        fee_benchmark_rate: feeBenchmarkRate.trim() === "" ? null : Number(feeBenchmarkRate),
       };
       if (isCreate) {
         const created = await authedFetch("/api/brands", { method: "POST", body: JSON.stringify(payload) });
@@ -453,6 +461,44 @@ function BrandModal({
             />
             <p className="mt-1 text-[11px] text-gray-400">
               입력하면 등록 직후 이 날짜부터 전월까지의 과거 데이터를 CMS에서 한 번에 가져와 반영합니다(백필).
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">그로스잇 수수료 기본값 (%, 선택)</label>
+            <div className="flex gap-2">
+              <input
+                className="input w-full"
+                type="number"
+                min={0}
+                max={100}
+                step="0.01"
+                placeholder="배달 수수료율"
+                value={feeDeliveryRate}
+                onChange={(e) => setFeeDeliveryRate(e.target.value)}
+              />
+              <input
+                className="input w-full"
+                type="number"
+                min={0}
+                max={100}
+                step="0.01"
+                placeholder="픽업 수수료율"
+                value={feePickupRate}
+                onChange={(e) => setFeePickupRate(e.target.value)}
+              />
+            </div>
+            <input
+              className="input mt-2 w-full"
+              type="number"
+              min={0}
+              max={100}
+              step="0.01"
+              placeholder="배달앱 벤치마크 (비우면 업계 평균 10.8%)"
+              value={feeBenchmarkRate}
+              onChange={(e) => setFeeBenchmarkRate(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-gray-400">
+              리포트 발행 화면④의 채널 효율 비교(수수료 절감액)에 미리 채워지는 값이며, 발행할 때 그 달에만 바꿀 수도 있습니다.
             </p>
           </div>
           <div>
