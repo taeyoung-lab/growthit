@@ -1,4 +1,3 @@
-
 // 리포트 모델(ReportModel) → PPT(.pptx). 2026-10-05 결정: QR오더 PPT 자산 대신 와일리/그로스잇 기본 스타일
 // (Navy #14213D + Mint #2EC4B6)로 먼저 만들고, 담당자가 새 템플릿을 올리면 교체합니다.
 // 서버(Node)에서 pptxgenjs로 생성해 바이너리로 내려줍니다 — 차트는 PowerPoint 네이티브 차트라 열어서 수정할 수 있습니다.
@@ -196,7 +195,7 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   // 4. 매출·GMV (일별·요일·시간대) ──────────────────────────────────────────
   {
     const sl = model.sales;
-    const s = frame(pres, model, "02", "매출 · GMV 성과 (일별 · 요일 · 시간대)", sl.ordersTruncated ? "주문 데이터 일부만 집계되어 요일·시간대는 참고용입니다" : "언제 가장 많이 팔렸는지");
+    const s = frame(pres, model, "02", "매출 · GMV 성과 (일별 · 요일 · 시간대)", sl.ordersSampled ? "주문이 매우 많아 시간대는 일부 주문으로 추정한 참고값입니다(요일은 일별 건수 합계)" : sl.ordersTruncated ? "주문 데이터 일부만 집계되어 요일·시간대는 참고용입니다" : "언제 가장 많이 팔렸는지");
     sectionLabel(s, "일별 그로스잇 매출 (만원)", 0.5, 1.2, 5);
     if (sl.daily.length > 0) {
       s.addChart(pres.ChartType.line, [{ name: "일별 매출(만원)", labels: sl.daily.map((d) => String(Number(d.date.slice(8)))), values: sl.daily.map((d) => Math.round(d.amount / 10000)) }], {
@@ -290,9 +289,9 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   // 9. 멤버십·고객 (구매 행동) ─────────────────────────────────────────────
   {
     const b = model.members.buyers;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (구매 행동)", b ? `${b.months.map(monthShort).join("·")} 구매 집계 기준${b.truncated ? " (일부만 집계)" : ""}` : "회원 구매 집계 데이터가 없습니다");
+    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (구매 행동)", b ? `${b.months.map(monthShort).join("·")} 구매 집계 기준${b.truncated ? " (일부만 집계)" : ""}` : model.sales.ordersSampled ? "월 주문이 매우 많은 브랜드는 제공하지 않습니다" : "회원 구매 집계 데이터가 없습니다");
     if (!b) {
-      empty(s, 0.5, 1.4, 9, 3.5, "이 달은 회원별 구매 집계가 저장돼 있지 않습니다 — 데이터를 다시 수집하면 표시됩니다");
+      empty(s, 0.5, 1.4, 9, 3.5, model.sales.ordersSampled ? "월 주문이 매우 많은 브랜드는 일부 주문만으로 재구매율·구매 빈도를 계산하면 실제보다 크게 낮게 나와, 이 섹션은 제공하지 않습니다" : "이 달은 회원별 구매 집계가 저장돼 있지 않습니다 — 데이터를 다시 수집하면 표시됩니다");
     } else {
       sectionLabel(s, "구매 빈도 (기간 합산 주문 횟수 기준)", 0.5, 1.2, 5);
       (b.frequency ?? []).forEach((f, i) => {
