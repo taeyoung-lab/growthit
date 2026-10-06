@@ -497,16 +497,14 @@ function spreadOrder(totalPages: number): number[] {
   return out;
 }
 
-async function fetchOrders(
+async function fetchOrdersMonth(
   getJson: GetJson,
   cmsUrl: string,
   ck: string,
   startDt: string,
   endDt: string
 ): Promise<{ agg: OrderAggregate; members: MemberOrderAgg }> {
-  const pageUrl = (page: number) =>
-    `/api/order?page=${page}&perPage=${ORDER_PAGE_SIZE}&storeId=&storeName=&orderSt=${ORDER_STATUS}&key=&keyword=` +
-    `&startDt=${startDt}+00:00&endDt=${endDt}+23:59&orderGb=&payTp=&cusLoginId=&isStoreAdmin=false&orderStType=list`;
+  const pageUrl = (page: number) => orderUrl(page, ORDER_PAGE_SIZE, startDt, endDt);
 
   const startedAt = Date.now();
   const deadline = startedAt + ORDER_TIME_BUDGET_MS;
@@ -602,6 +600,164 @@ async function fetchOrders(
   const flat: number[] = [];
   members.forEach(([cnt, amt], id) => flat.push(id, cnt, amt));
   return { agg, members: { flat, truncated: agg.truncated } };
+}
+
+const orderUrl = (page: number, perPage: number, from: string, to: string) =>
+  `/api/order?page=${page}&perPage=${perPage}&storeId=&storeName=&orderSt=${ORDER_STATUS}&key=&keyword=` +
+  `&startDt=${from}+00:00&endDt=${to}+23:59&orderGb=&payTp=&cusLoginId=&isStoreAdmin=false&orderStType=list`;
+
+function rejectAfter(ms: number, msg: string): Promise<never> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms));
+}
+
+// 2026-10-06 우지커피(월 78만 건): CMS에 "한 달 범위"로 주문을 요청하면 약 28초 뒤 HTTP 500으로 실패합니다(진단 기록으로
+// 확인). 하루 범위로 나누면 CMS가 처리할 수 있는 크기가 되므로, 월 조회가 실패하거나 상한(15만 건)을 넘는 브랜드는
+// 하루씩 나눠서 읽습니다. 하루마다 ① 건수만 먼저 받고(perPage=1) ② 그날 주문을 고르게 걸치는 최대 3페이지를 읽습니다.
+//  - 요일별 주문 수 = 날짜별 CMS 건수의 합(표본이 아니라 실제 값, 취소 포함이라 취소 비율만큼 보정)
+//  - 시간대·주문유형 분포와 평균 결제액 = 표본에서 계산해 전체 건수에 맞춰 늘린 추정치(sampled=true)
+//  - 회원별 구매 집계는 표본뿐이라 truncated=true(재구매율 등은 표시하지 않음)
+async function fetchOrdersDaily(
+  getJson: GetJson,
+  cmsUrl: string,
+  ck: string,
+  startDt: string,
+  endDt: string
+): Promise<{ agg: OrderAggregate; members: MemberOrderAgg }> {
+  const days: string[] = [];
+  for (let d = new Date(`${startDt}T00:00:00Z`); d <= new Date(`${endDt}T00:00:00Z`); d = new Date(d.getTime() + 86_400_000)) {
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const deadline = Date.now() + ORDER_TIME_BUDGET_MS;
+  const dayTotal = new Map<string, number>(); // 날짜 → CMS가 알려준 건수(취소 포함)
+  const members = new Map<number, [number, number]>();
+  const hourN: number[] = Array(24).fill(0);
+  const chanN: Record<string, number> = {};
+  const dowSample = Array.from({ length: 7 }, () => ({ n: 0, amt: 0 }));
+  let sampleN = 0; // 취소 제외 표본 수
+  let sampleAmt = 0;
+  let rowsRead = 0; // 취소 포함 표본 행 수
+  let pagesRead = 0;
+
+  const consume = (list: unknown[]) => {
+    rowsRead += list.length;
+    for (const raw of list) {
+      const o = rec(raw);
+      if (str(o.orderStNm) === "주문취소") continue;
+      const net = num(o.netSales);
+      sampleN += 1;
+      sampleAmt += net;
+      const gb = str(o.orderGbNm) || "기타";
+      chanN[gb] = (chanN[gb] ?? 0) + 1;
+      const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2})/.exec(str(o.orderDt));
+      if (m) {
+        const dow = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay();
+        dowSample[dow].n += 1;
+        dowSample[dow].amt += net;
+        hourN[Number(m[4])] += 1;
+      }
+      const cusId = typeof o.cusId === "number" ? o.cusId : null;
+      if (cusId) {
+        const cur = members.get(cusId) ?? [0, 0];
+        cur[0] += 1;
+        cur[1] += net;
+        members.set(cusId, cur);
+      }
+    }
+  };
+
+  const CONC = 6;
+  let next = 0;
+  let dayIdx = 0;
+  const worker = async () => {
+    while (next < days.length) {
+      if (Date.now() > deadline) return;
+      const day = days[next++];
+      try {
+        const head = rec(await getJson(cmsUrl, orderUrl(1, 1, day, day), ck));
+        const total = num(head.totalCnt);
+        dayTotal.set(day, total);
+        const pages = Math.ceil(total / ORDER_PAGE_SIZE);
+        if (pages === 0) continue;
+        // 읽을 페이지: 3페이지 이하면 전부, 아니면 하루에 고르게 걸치되 날짜마다 위치를 달리해 한 시간대에 쏠리지 않게 합니다.
+        const picks = new Set<number>();
+        if (pages <= 3) for (let p = 1; p <= pages; p++) picks.add(p);
+        else {
+          const off = (dayIdx++ % 3) / 3; // 0, 1/3, 2/3
+          for (let k = 0; k < 3; k++) picks.add(Math.min(pages, Math.max(1, Math.floor(((k + 0.5 + off * 0.9) / 3) * pages) + 1)));
+        }
+        for (const p of picks) {
+          if (Date.now() > deadline) break;
+          consume(arr(rec(await getJson(cmsUrl, orderUrl(p, ORDER_PAGE_SIZE, day, day), ck)).list));
+          pagesRead += 1;
+        }
+      } catch (e) {
+        if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+        // 그날은 건너뜁니다 — 다른 날 결과는 살립니다
+      }
+    }
+  };
+  await Promise.race([
+    Promise.all(Array.from({ length: CONC }, () => worker())),
+    new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now()) + 8_000)),
+  ]);
+  if (sampleN === 0 || dayTotal.size === 0) throw new Error("일 단위 주문 조회에서 읽은 주문이 없습니다");
+
+  const totalAll = [...dayTotal.values()].reduce((a, b) => a + b, 0);
+  const keep = rowsRead > 0 ? sampleN / rowsRead : 1; // 취소 제외 비율
+  const orderCount = Math.round(totalAll * keep);
+  const meanAll = sampleAmt / sampleN;
+  const byDow: number[] = Array(7).fill(0);
+  const byDowAmount: number[] = Array(7).fill(0);
+  for (const [day, n] of dayTotal) {
+    const dow = new Date(`${day}T00:00:00Z`).getUTCDay();
+    byDow[dow] += n * keep;
+  }
+  for (let i = 0; i < 7; i++) {
+    const mean = dowSample[i].n > 0 ? dowSample[i].amt / dowSample[i].n : meanAll;
+    byDowAmount[i] = Math.round(byDow[i] * mean);
+    byDow[i] = Math.round(byDow[i]);
+  }
+  const k = sampleN > 0 ? orderCount / sampleN : 1;
+  const byChannel: Record<string, number> = {};
+  for (const key of Object.keys(chanN)) byChannel[key] = Math.round(chanN[key] * k);
+
+  const agg: OrderAggregate = {
+    orderCount,
+    amount: Math.round(orderCount * meanAll),
+    byDow,
+    byDowAmount,
+    byHour: hourN.map((v) => Math.round(v * k)),
+    byChannel,
+    memberCount: 0,
+    pagesRead,
+    truncated: true,
+    sampled: true,
+    totalCnt: totalAll,
+  };
+  // 회원별 구매 집계는 표본(전체의 일부)으로는 재구매율·빈도가 실제보다 크게 낮게 나오므로 저장하지 않습니다(빈 집계).
+  // 리포트의 "회원 구매 행동" 섹션은 "집계 데이터가 없습니다"로 표시됩니다.
+  void members;
+  return { agg, members: { flat: [], truncated: true } };
+}
+
+// 월 범위로 먼저 건수만 물어봅니다(10초 안에 못 받으면 대형 브랜드로 보고 일 단위로 읽습니다).
+async function fetchOrders(
+  getJson: GetJson,
+  cmsUrl: string,
+  ck: string,
+  startDt: string,
+  endDt: string
+): Promise<{ agg: OrderAggregate; members: MemberOrderAgg }> {
+  let probe: number | null = null;
+  try {
+    const j = rec(await Promise.race([getJson(cmsUrl, orderUrl(1, 1, startDt, endDt), ck), rejectAfter(10_000, "월 범위 주문 건수 조회 지연")]));
+    probe = num(j.totalCnt);
+  } catch (e) {
+    if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+    probe = null;
+  }
+  if (probe !== null && probe <= ORDER_MAX_PAGES * ORDER_PAGE_SIZE) return fetchOrdersMonth(getJson, cmsUrl, ck, startDt, endDt);
+  return fetchOrdersDaily(getJson, cmsUrl, ck, startDt, endDt);
 }
 
 // ── 진입점 ───────────────────────────────────────────────────────────────────
