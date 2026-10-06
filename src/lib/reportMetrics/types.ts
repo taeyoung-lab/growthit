@@ -1,4 +1,3 @@
-
 // 리포트 지표 계산 모듈의 입출력 타입. 계산 로직은 전부 순수 함수(buildReportModel 등)라서
 // 서버(API)와 클라이언트(화면④ 미리보기)가 같은 코드를 씁니다.
 
@@ -108,6 +107,7 @@ export interface ReportModel {
     dow: { label: string; orders: number; amount: number }[];
     hours: number[];
     ordersTruncated: boolean;
+    ordersSampled: boolean; // 대형 브랜드: 일부 주문만 읽어 늘린 추정치
   };
   channel: {
     channels: { name: string; pay: number; orders: number; share: number }[];
