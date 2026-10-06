@@ -217,6 +217,28 @@ async function fetchSalesStore(getJson: GetJson, cmsUrl: string, ck: string, sta
   });
 }
 
+// 2026-10-06: 우지커피처럼 매장이 595개·월 주문이 78만 건인 대형 브랜드는 매장별 매출통계가 섹션 제한시간
+// 안에 안 돌아와 salesStore가 통째로 비었고, 그러면 "전체 매출"(비중의 분모)과 앱결제액이 사라져
+// 정산 합계(마이너스 값)로 잘못 대체되는 문제가 있었습니다. perPage=1이면 [0]이 "전체" 합계 행이라
+// 매장 로우를 받지 않아 빠르므로, 매장별 조회가 실패했을 때 "전체" 행(전체+앱)만이라도 확보합니다.
+async function fetchSalesTotalOnly(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
+  const base = `page=1&perPage=1&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m`;
+  const tail = "isStoreAdmin=false&sortColumn=&sortDir=";
+  const [allJ, appJ] = await Promise.all([
+    getJson(cmsUrl, `/api/salesStats/store?${base}&salesTp=&channel=&${tail}`, ck),
+    getJson(cmsUrl, `/api/salesStats/store?${base}&${APP_FILTER}&${tail}`, ck).catch((e) => {
+      if (e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") throw e;
+      return null;
+    }),
+  ]);
+  const first = arr(rec(allJ).list)[0];
+  if (!first) return null;
+  const row = toSalesRow(first, str(rec(first).gubun) || "전체");
+  const appFirst = arr(rec(appJ).list)[0];
+  row.app = appFirst ? toAppSplit(appFirst) : null;
+  return [row];
+}
+
 // 온라인 안의 채널별(우리가잇다·배달의민족·쿠팡이츠…) 합계 — 전체 행의 salesStatsList가 채널 단위로 쪼개집니다.
 async function fetchOnlineChannels(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
   const q = `page=1&perPage=1&startDt=${startDt}&endDt=${endDt}&storeId=0&timeTp=&period=1m&salesTp=${ONLINE}&channel=&isStoreAdmin=false&sortColumn=&sortDir=`;
@@ -479,7 +501,9 @@ export async function collectExtras(
     memberLevels,
     ordersResult,
   ] = await Promise.all([
-    section("매장별 매출통계", () => fetchSalesStore(getJson, cmsUrl, ck, startDt, endDt)),
+    section("매장별 매출통계", () => fetchSalesStore(getJson, cmsUrl, ck, startDt, endDt)).then(
+      (full) => full ?? section("전체 매출 합계(매장별 조회 실패 대체)", () => fetchSalesTotalOnly(getJson, cmsUrl, ck, startDt, endDt))
+    ),
     section("메뉴별 매출통계", () => fetchSalesItem(getJson, cmsUrl, ck, startDt, endDt)),
     section("성별/연령별 매출통계", () => fetchGenderAge(getJson, cmsUrl, ck, startDt, endDt)),
     section("온라인 채널별 매출", () => fetchOnlineChannels(getJson, cmsUrl, ck, startDt, endDt)),
