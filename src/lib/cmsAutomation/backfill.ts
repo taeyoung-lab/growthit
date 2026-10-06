@@ -234,3 +234,123 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
   return { done: isDone, processedMonths: processed, skippedMonths: skipped };
 }
 
+
+// 2026-10-05: 건너뛴 달 재수집 — runBackfillBatch는 GATEWAY_TIMEOUT으로 건너뛴 달을
+// backfill_skipped_months에 기록만 하고 다시는 시도하지 않습니다. 그런데 같은 날 collect.ts에
+// 정산 엑셀 대체 경로(getSettlementsWithFallback)가 추가되어, 예전에 JSON 504로 건너뛴 달도 이제
+// 수집이 됩니다(브래덴코 2026-06~09 수동 수집으로 확인 — 월당 약 64초). 이 함수는 건너뛴 달
+// 목록에서 "한 번에 한 달"만 다시 수집합니다 — 한 달이 최대 약 64초라 로그인(3~6초)까지 합쳐도
+// 120초 하드 리밋 안이지만, 여러 달을 한 번에 돌리면 넘길 수 있어 의도적으로 한 달씩만 처리합니다.
+//
+// 성공하면 brandMonthlyData를 source "BACKFILL"로 저장하고(이미 담당자가 수동 수집으로 채워둔 달이면
+// 그 문서의 overrides/published는 보존) 건너뛴 목록에서 뺍니다(arrayRemove). 실패하면 목록은 그대로
+// 둡니다. backfill_completed_through / backfill_status는 건드리지 않습니다 — 이 달들은 이미
+// completed_through 이전이라 일반 백필 흐름과 무관합니다.
+export interface RetrySkippedResult {
+  yearMonth: string | null; // 이번에 시도한 달 (건너뛴 달이 없었으면 null)
+  ok: boolean;
+  source?: "JSON" | "EXCEL_FALLBACK"; // 성공 시 정산을 어느 경로로 받았는지
+  remainingSkippedMonths: string[]; // 이번 실행 후에도 건너뛴 상태로 남은 달
+  message?: string; // ok=false일 때 사유
+}
+
+export async function retrySkippedMonth(brandId: string, uid: string, requestedMonth?: string): Promise<RetrySkippedResult> {
+  const db = getAdminDb();
+  const brandRef = db.collection("brands").doc(brandId);
+  const credsRef = db.collection("brandCredentials").doc(brandId);
+
+  const [brandSnap, credsSnap] = await Promise.all([brandRef.get(), credsRef.get()]);
+  if (!brandSnap.exists) throw new Error("대상 브랜드를 찾을 수 없습니다.");
+  const brand = brandSnap.data() as ReportBrand;
+  if (!credsSnap.exists) throw new Error("저장된 CMS 계정 정보가 없습니다.");
+  const creds = credsSnap.data() as BrandCredentials;
+
+  const skippedAll = [...(brand.backfill_skipped_months ?? [])].sort();
+  if (skippedAll.length === 0) {
+    return { yearMonth: null, ok: true, remainingSkippedMonths: [] };
+  }
+  const yearMonth = requestedMonth ?? skippedAll[0];
+  if (!skippedAll.includes(yearMonth)) {
+    return { yearMonth, ok: false, remainingSkippedMonths: skippedAll, message: `${yearMonth}은(는) 건너뛴 달 목록에 없습니다.` };
+  }
+
+  const login = async () => {
+    const s = await loginToCms({
+      cmsUrl: brand.cms_url,
+      username: creds.cms_username,
+      password: decryptCmsPassword(creds.cms_password_encrypted),
+      phoneVerificationRequired: brand.phone_verification_required,
+      fixedVerificationCode: creds.fixed_verification_code_encrypted
+        ? decryptCmsPassword(creds.fixed_verification_code_encrypted)
+        : null,
+    });
+    await credsRef.update({
+      cms_session_cookie_encrypted: encryptCmsPassword(s.cookieHeader),
+      cms_session_cached_at: Date.now(),
+    });
+    return s;
+  };
+
+  const hasValidCache =
+    !!creds.cms_session_cookie_encrypted &&
+    !!creds.cms_session_cached_at &&
+    Date.now() - creds.cms_session_cached_at < SESSION_CACHE_TTL_MS;
+  let session = hasValidCache ? { cookieHeader: decryptCmsPassword(creds.cms_session_cookie_encrypted!) } : await login();
+
+  let collected;
+  try {
+    try {
+      collected = await collectMonthlyData(brand.cms_url, session, yearMonth);
+    } catch (e) {
+      // 캐시된 세션이 이미 무효했던 경우(401/403)는 응답이 즉시 오므로, 새로 로그인해 한 번만 재시도합니다.
+      if (hasValidCache && e instanceof CmsAutomationError && e.step === "SESSION_EXPIRED") {
+        session = await login();
+        collected = await collectMonthlyData(brand.cms_url, session, yearMonth);
+      } else {
+        throw e;
+      }
+    }
+  } catch (e) {
+    if (e instanceof CmsAutomationError) {
+      console.warn(`[retrySkipped] ${brandId} ${yearMonth} 재수집 실패(${e.step})`, e);
+      return { yearMonth, ok: false, remainingSkippedMonths: skippedAll, message: e.message };
+    }
+    throw e;
+  }
+
+  const docId = `${brandId}_${yearMonth}`;
+  const docRef = db.collection("brandMonthlyData").doc(docId);
+  const existing = await docRef.get();
+  const prev = existing.exists ? (existing.data() as BrandMonthlyData) : null;
+
+  const data: BrandMonthlyData = {
+    id: docId,
+    organization_id: brand.organization_id,
+    brand_id: brandId,
+    year_month: yearMonth,
+    source: "BACKFILL",
+    data: {
+      dashboard: collected.dashboard,
+      settlementsSales: collected.settlementsSales,
+      settlementSource: collected.settlementSource,
+      targetGroupStats: collected.targetGroupStats,
+      storeManage: collected.storeManage,
+      memberStats: collected.memberStats,
+    },
+    // 수동 수집 등으로 이미 이 달 문서가 있었다면, 담당자가 고친 값(overrides)과 발행 여부는 보존합니다.
+    overrides: prev?.overrides ?? {},
+    published: prev?.published ?? false,
+    collected_at: collected.collectedAt,
+    collected_by: uid,
+    updated_at: Date.now(),
+  };
+  await docRef.set(data);
+  await brandRef.update({ backfill_skipped_months: FieldValue.arrayRemove(yearMonth), updated_at: Date.now() });
+
+  return {
+    yearMonth,
+    ok: true,
+    source: collected.settlementSource,
+    remainingSkippedMonths: skippedAll.filter((m) => m !== yearMonth),
+  };
+}
