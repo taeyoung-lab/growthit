@@ -2,7 +2,7 @@ import { CmsAutomationError } from "./types";
 import type { CmsCollectionResult, CmsSession } from "./types";
 import { parseFirstSheetRows } from "./xlsxLite";
 import { settlementsRowsToJson } from "./settlementsExcel";
-import { collectExtras } from "./collectExtras";
+import { collectExtras, fetchAllPages } from "./collectExtras";
 
 // 로그인 이후 데이터 수집 — 화면을 다시 띄우지 않고, 로그인으로 얻은 쿠키를 그대로 실어 CMS가
 // 내부적으로 쓰는 JSON API를 직접 호출합니다(login.ts 상단 주석 참고 — 2026-10-01 청자다방
@@ -293,9 +293,36 @@ async function getSettlementsWithFallback(
 // 기획 문서의 "미도입 매장" 판별 기준(displayYn===0 && storeSt==="350004")과 정확히 일치함을
 // 확인했습니다.
 async function getStoreManage(cmsUrl: string, cookieHeader: string): Promise<unknown> {
-  const query =
-    "page=1&perPage=500&type=storeNm&keyword=&region=&storeState=&stampYn=&displayYn=&isStoreAdmin=false&storeId=";
-  return getJson(cmsUrl, `/api/storeManage?${query}`, cookieHeader);
+  // 2026-10-06: perPage=500 한 번만 받으면 매장이 500개를 넘는 브랜드(우지커피 약 590개, 처갓집 1,000개 이상)는
+  // 매장 수가 500으로 잘려 나왔습니다 — totalCnt를 보고 모든 페이지를 받습니다. 또 매장 한 줄이 800바이트가 넘어
+  // 저장 문서(1MB 한도)의 절반을 차지했으므로, 리포트가 쓰는 두 값(매장 상태 storeSt·노출 여부 displayYn)만 남깁니다.
+  const PER = 500;
+  const { rows, totalCnt } = await fetchAllPages(
+    getJson,
+    cmsUrl,
+    cookieHeader,
+    (page) =>
+      `/api/storeManage?page=${page}&perPage=${PER}&type=storeNm&keyword=&region=&storeState=&stampYn=&displayYn=&isStoreAdmin=false&storeId=`,
+    PER
+  );
+  const list = rows.map((r) => {
+    const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
+    return { storeSt: o.storeSt ?? null, displayYn: o.displayYn ?? null };
+  });
+  return { totalCnt: Math.max(totalCnt, list.length), list };
+}
+
+// 정산 응답의 매장별 목록(list)은 대형 브랜드에서 20만 바이트를 넘고, 리포트는 합계(totalInfo)와 매장 수(totalCnt)만
+// 씁니다 — 정산 결제액 상위 일부만 남겨 저장 문서 크기를 줄입니다(합계 값은 그대로).
+function compactSettlements(data: unknown): unknown {
+  if (!data || typeof data !== "object") return data;
+  const d = data as Record<string, unknown>;
+  const list = Array.isArray(d.list) ? (d.list as Record<string, unknown>[]) : [];
+  if (list.length <= 30) return data;
+  const top = [...list]
+    .sort((x, y) => Number(y.itemPayAmount ?? 0) - Number(x.itemPayAmount ?? 0))
+    .slice(0, 30);
+  return { ...d, totalCnt: d.totalCnt ?? list.length, list: top };
 }
 
 // 2026-10-02 테스트_브래덴코 네트워크 탭에서 직접 확인(표준형 기준만 검증). 이 엔드포인트는
@@ -369,7 +396,7 @@ export async function collectMonthlyData(
   return {
     yearMonth,
     dashboard: dashboardResult.value,
-    settlementsSales: settlementsResult.value.data,
+    settlementsSales: compactSettlements(settlementsResult.value.data),
     settlementSource: settlementsResult.value.source,
     targetGroupStats: targetGroupResult.value,
     storeManage,
