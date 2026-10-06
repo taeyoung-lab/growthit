@@ -4,6 +4,7 @@ import { decryptCmsPassword, encryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "./login";
 import { collectMonthlyData, CMS_FETCH_TIMEOUT_MS } from "./collect";
 import { CmsAutomationError } from "./types";
+import { saveMemberAggregates, fitMonthlyDataSize } from "./memberAggStore";
 import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
 
 // 2026-10-02: 로그인 세션 재사용 — "백필 이어하기"를 누를 때마다 매번 새 서버 실행(invocation)이
@@ -168,14 +169,15 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
         brand_id: brandId,
         year_month: yearMonth,
         source: "BACKFILL",
-        data: {
+        data: fitMonthlyDataSize({
           dashboard: collected.dashboard,
           settlementsSales: collected.settlementsSales,
           settlementSource: collected.settlementSource,
           targetGroupStats: collected.targetGroupStats,
           storeManage: collected.storeManage,
           memberStats: collected.memberStats,
-        },
+          extras: collected.extras,
+        }),
         overrides: {},
         published: false,
         collected_at: collected.collectedAt,
@@ -185,6 +187,16 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
       // eslint-disable-next-line no-await-in-loop -- 달 순서대로 진행 상황을 즉시 저장해야
       // 중간에 함수가 강제 종료돼도 이미 처리한 달이 보존됩니다(위 주석 참고).
       await db.collection("brandMonthlyData").doc(docId).set(data);
+      if (collected.memberOrderAgg) {
+        // 회원 집계 저장 실패는 본 데이터 저장을 되돌리지 않습니다(경고만).
+        // eslint-disable-next-line no-await-in-loop
+        await saveMemberAggregates(db, {
+          brandId,
+          organizationId: brand.organization_id,
+          yearMonth,
+          agg: collected.memberOrderAgg,
+        }).catch((err) => console.warn(`[backfill] ${brandId} ${yearMonth} 회원 집계 저장 실패`, err));
+      }
       // eslint-disable-next-line no-await-in-loop
       await brandRef.update({ backfill_completed_through: yearMonth, updated_at: Date.now() });
       processed.push(yearMonth);
@@ -329,14 +341,15 @@ export async function retrySkippedMonth(brandId: string, uid: string, requestedM
     brand_id: brandId,
     year_month: yearMonth,
     source: "BACKFILL",
-    data: {
+    data: fitMonthlyDataSize({
       dashboard: collected.dashboard,
       settlementsSales: collected.settlementsSales,
       settlementSource: collected.settlementSource,
       targetGroupStats: collected.targetGroupStats,
       storeManage: collected.storeManage,
       memberStats: collected.memberStats,
-    },
+      extras: collected.extras,
+    }),
     // 수동 수집 등으로 이미 이 달 문서가 있었다면, 담당자가 고친 값(overrides)과 발행 여부는 보존합니다.
     overrides: prev?.overrides ?? {},
     published: prev?.published ?? false,
@@ -345,6 +358,14 @@ export async function retrySkippedMonth(brandId: string, uid: string, requestedM
     updated_at: Date.now(),
   };
   await docRef.set(data);
+  if (collected.memberOrderAgg) {
+    await saveMemberAggregates(db, {
+      brandId,
+      organizationId: brand.organization_id,
+      yearMonth,
+      agg: collected.memberOrderAgg,
+    }).catch((err) => console.warn(`[retrySkipped] ${brandId} ${yearMonth} 회원 집계 저장 실패`, err));
+  }
   await brandRef.update({ backfill_skipped_months: FieldValue.arrayRemove(yearMonth), updated_at: Date.now() });
 
   return {
