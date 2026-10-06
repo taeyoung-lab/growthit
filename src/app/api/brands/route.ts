@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
 import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
 import { encryptCmsPassword } from "@/lib/cmsCredentials";
-import type { ReportBrand, BrandCredentials } from "@/lib/types";
+import type { ReportBrand, BrandCredentials, BrandFeeDefaults } from "@/lib/types";
 
 // 그로스잇 브랜드 정기 성과 리포트 자동화 — 브랜드 생성/수정 전용 API.
 // src/app/brands/page.tsx(브랜드명·CMS URL 등 비밀 아닌 필드)는 기존처럼 클라이언트 Firestore SDK로
@@ -26,6 +26,27 @@ interface BrandRequestBody {
   // 브레댄코처럼 phone_verification_required=true인 브랜드만 사용(고정 인증번호). 평문으로 받아
   // cms_password와 동일하게 이 라우트에서만 암호화합니다. 비워두면(수정 시) 기존 저장값 유지.
   fixed_verification_code: string | null;
+  // 그로스잇 수수료 기본값(%) — 2026-10-05 추가(화면④ 수수료 키인 기본값). 필드를 아예 보내지 않으면
+  // (수정 시) 기존 저장값을 유지하고, null을 보내면 "미입력"으로 비웁니다.
+  fee_delivery_rate?: number | null;
+  fee_pickup_rate?: number | null;
+  fee_benchmark_rate?: number | null;
+}
+
+function isValidRate(v: unknown): boolean {
+  return v === null || v === undefined || (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100);
+}
+
+// 수수료율 3개 중 하나라도 보낸 경우에만 기본값 객체를 만들어 돌려줍니다(안 보낸 필드는 existing 값 유지).
+function buildFeeDefaults(body: Partial<BrandRequestBody>, existing?: BrandFeeDefaults): BrandFeeDefaults | undefined {
+  const touched =
+    body.fee_delivery_rate !== undefined || body.fee_pickup_rate !== undefined || body.fee_benchmark_rate !== undefined;
+  if (!touched) return existing;
+  return {
+    delivery_rate: body.fee_delivery_rate !== undefined ? body.fee_delivery_rate : (existing?.delivery_rate ?? null),
+    pickup_rate: body.fee_pickup_rate !== undefined ? body.fee_pickup_rate : (existing?.pickup_rate ?? null),
+    benchmark_rate: body.fee_benchmark_rate !== undefined ? body.fee_benchmark_rate : (existing?.benchmark_rate ?? null),
+  };
 }
 
 function validate(body: Partial<BrandRequestBody>): string | null {
@@ -38,6 +59,9 @@ function validate(body: Partial<BrandRequestBody>): string | null {
   }
   if ((body.cms_username && !body.cms_password) || (!body.cms_username && body.cms_password)) {
     return "CMS 아이디와 비밀번호는 함께 입력해주세요.";
+  }
+  if (!isValidRate(body.fee_delivery_rate) || !isValidRate(body.fee_pickup_rate) || !isValidRate(body.fee_benchmark_rate)) {
+    return "수수료율은 0~100 사이 숫자(%)로 입력해주세요.";
   }
   return null;
 }
@@ -81,6 +105,7 @@ export async function POST(req: NextRequest) {
       backfill_status: body.service_open_date?.trim() ? "PENDING" : null,
       backfill_completed_through: null,
       backfill_skipped_months: [],
+      ...(buildFeeDefaults(body) ? { fee_defaults: buildFeeDefaults(body) } : {}),
       last_published_month: null,
       brand_status: "ACTIVE",
       created_at: now,
@@ -147,6 +172,8 @@ export async function PATCH(req: NextRequest) {
       updated_at: now,
     };
     if (wantsCredentialChange) updates.has_saved_credentials = true;
+    const feeDefaults = buildFeeDefaults(body, existing.fee_defaults);
+    if (feeDefaults) updates.fee_defaults = feeDefaults;
     // 서비스 오픈일을 기존에 없다가 이번에 처음 입력한 경우에만 백필 대상으로 새로 표시합니다
     // (이미 백필이 끝났거나 진행 중인 브랜드를 수정 한 번으로 재대상화하지 않도록).
     //
