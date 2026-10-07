@@ -140,6 +140,19 @@ export function buildReportModel(input: ReportInput): ReportModel {
     .filter((r) => str(r.yyyymmdd).startsWith(yearMonth) && (r.storeId === undefined || r.storeId === 0))
     .map((r) => ({ date: str(r.yyyymmdd), amount: num(r.totalSalesAmt), orders: num(r.orderCnt) }))
     .sort((a, b) => a.date.localeCompare(b.date));
+  const prevDaily = input.prevDaily ?? [];
+  const daysIn = (ym: string) => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+  const days = daysIn(yearMonth);
+  const prevDays = prev ? daysIn(prevYm) : null;
+  const perDay = (v: number | null | undefined, d: number | null) => (v != null && d ? v / d : null);
+  const pctOf = (a: number | null, b: number | null) => (a != null && b != null && b !== 0 ? round1(((a - b) / b) * 100) : null);
+  const dailyAvgItems = [
+    { key: "appPayDay", label: "앱결제액(그로스잇 매출)/일", unit: "원" as const, value: perDay(cur.appPay, days), prev: perDay(prev?.appPay, prevDays) },
+    { key: "appOrdersDay", label: "앱 주문/일", unit: "건" as const, value: perDay(cur.appOrders, days), prev: perDay(prev?.appOrders, prevDays) },
+    { key: "totalPayDay", label: "전체 매출(온라인+오프라인)/일", unit: "원" as const, value: perDay(cur.totalPay, days), prev: perDay(prev?.totalPay, prevDays) },
+    { key: "newMembersDay", label: "신규 회원/일", unit: "명" as const, value: perDay(cur.newMembers, days), prev: perDay(prev?.newMembers, prevDays) },
+  ].map((x) => ({ ...x, value: x.value == null ? null : Math.round(x.value), prev: x.prev == null ? null : Math.round(x.prev), pct: pctOf(x.value, x.prev) }));
+  const dailyAvg = dailyAvgItems.some((x) => x.value != null) ? { days, prevDays, items: dailyAvgItems } : null;
   const ord = extras?.orders ?? null;
   const dow = ord ? DOW.map((label, i) => ({ label, orders: ord.byDow[i] ?? 0, amount: ord.byDowAmount[i] ?? 0 })) : [];
 
@@ -200,6 +213,9 @@ export function buildReportModel(input: ReportInput): ReportModel {
       if (c > 0) levels.push({ label: `등급 ${i}`, count: c, rate: round2(num(msRow[`cusLevelRat${i}`])) });
     }
   }
+  // 등급제가 없는 브랜드(우지커피 등)는 모든 회원이 기본 등급 하나에 몰려 "등급 N" 막대 하나만 나옵니다 —
+  // 회원이 2개 이상 등급에 나뉘어 있을 때만 등급제가 있는 것으로 보고 분포를 보여줍니다(2026-10-07).
+  if (levels.length < 2) levels.length = 0;
 
   const topItems = mergeItems(extras?.salesItem ?? []).slice(0, 10);
 
@@ -265,7 +281,9 @@ export function buildReportModel(input: ReportInput): ReportModel {
   if (notAdopted > 0) suggestions.push(`앱 미도입 매장이 ${notAdopted}곳입니다 — 오픈 일정 확정과 매장 교육 일정을 잡으세요.`);
   const nonactive = segments.find((s) => s.label === "미활동 고객");
   if (nonactive && nonactive.rate >= 50) suggestions.push(`미활동 고객이 ${nonactive.rate}%입니다 — 휴면 회원 리마인드 푸시·쿠폰 캠페인을 검토하세요.`);
-  if (coupons && coupons.issued > 0 && coupons.rate < 25) suggestions.push(`쿠폰 사용률이 ${coupons.rate}%입니다 — 쿠폰 유효기간·발급 대상을 점검하세요.`);
+  // 쿠폰 사용 0건은 CMS 쿠폰 통계가 사용 건수를 집계하지 못한 경우가 많아(우지커피: 발급 32만 건·사용 0건)
+  // 사용률 제안은 사용 건수가 잡힌 경우에만 합니다.
+  if (coupons && coupons.issued > 0 && coupons.used > 0 && coupons.rate < 25) suggestions.push(`쿠폰 사용률이 ${coupons.rate}%입니다 — 쿠폰 유효기간·발급 대상을 점검하세요.`);
   if (input.members?.retention && input.members.retention.rate < 40) suggestions.push(`전월 구매자의 재구매율이 ${input.members.retention.rate}%입니다 — 재구매 유도(스탬프·등급 혜택) 프로모션을 검토하세요.`);
   if (fee.missingFee) suggestions.push("그로스잇 수수료율이 입력되지 않아 절감액을 계산하지 못했습니다 — 브랜드 설정에서 배달·픽업 수수료율을 입력하세요.");
 
@@ -276,9 +294,17 @@ export function buildReportModel(input: ReportInput): ReportModel {
     { item: "온라인 채널별 매출(배달앱 비교)", ok: channels.length > 0, note: channels.length > 0 ? `${channels.length}개 채널` : "수집 실패" },
     { item: "메뉴·성별/연령 매출", ok: topItems.length > 0 && gender.length > 0, note: topItems.length > 0 ? "수집됨" : "수집 실패 또는 앱 매출 없음" },
     { item: "주문 단위 집계(요일·시간대)", ok: !!ord && (!ord.truncated || !!ord.sampled), note: !ord ? "수집 실패" : ord.sampled ? `월 ${(ord.totalCnt ?? 0).toLocaleString("ko-KR")}건 중 일부(${ord.pagesRead}페이지)를 읽어 전체로 늘린 추정치` : ord.truncated ? "시간/페이지 상한으로 일부만 집계됨" : `${ord.orderCount.toLocaleString("ko-KR")}건 전체 집계` },
-    { item: "회원 구매 집계(빈도·재구매·파레토)", ok: (!!members && !members.truncated) || (!members && !!ord?.sampled), note: !members ? (ord?.sampled ? "월 주문이 매우 많은 브랜드라 표본으로는 정확하지 않아 제공하지 않음" : "집계 데이터 없음(수집 전 월이거나 저장 실패)") : `${members.months.join(", ")} 기준${members.truncated ? " (일부만 집계)" : ""}` },
+    { item: "회원 구매 집계(빈도·재구매·파레토)", ok: (!!members && !members.truncated) || (!members && !!ord?.sampled), skipped: !members && !!ord?.sampled, note: !members ? (ord?.sampled ? "월 주문이 매우 많은 브랜드라 표본으로는 정확하지 않아 제공하지 않음" : "집계 데이터 없음(수집 전 월이거나 저장 실패)") : `${members.months.join(", ")} 기준${members.truncated ? " (일부만 집계)" : ""}` },
     { item: "전월 비교 데이터", ok: !!prev, note: prev ? `${prevYm} 데이터로 계산` : `${prevYm} 데이터 없음 — CMS가 준 전월 대비 값을 대신 씁니다` },
-    { item: "방문자·쿠폰·이벤트", ok: !!visitors && !!coupons && !!events, note: visitors && coupons && events ? "수집됨" : "일부 수집 실패" },
+    {
+      item: "방문자·쿠폰·이벤트",
+      ok: !!visitors && !!coupons && !!events && !(coupons.issued > 0 && coupons.used === 0),
+      note: !(visitors && coupons && events)
+        ? "일부 수집 실패"
+        : coupons.issued > 0 && coupons.used === 0
+          ? "쿠폰 사용이 0건으로 집계됨 — CMS 쿠폰 통계의 사용 집계를 확인하세요(리포트에는 사용 건수를 '-'로 표시)"
+          : "수집됨",
+    },
     { item: "그로스잇 수수료율(배달·픽업)", ok: !fee.missingFee && deliveryRate !== null && pickupRate !== null, note: fee.missingFee ? "미입력 — 절감액 계산 불가" : deliveryRate === null || pickupRate === null ? "일부 미입력(해당 유형 매출이 없어 계산에는 영향 없음)" : "입력됨" },
     { item: "정산 데이터 경로", ok: str(data.settlementSource) !== "EXCEL_FALLBACK", note: str(data.settlementSource) === "EXCEL_FALLBACK" ? "CMS 정산 조회 지연으로 엑셀 경로 사용 — 일부 값이 CMS 화면과 다를 수 있음" : "JSON" },
     { item: "익월 목표·액션 입력", ok: (overrides.next_goals?.length ?? 0) > 0 || (overrides.actions?.length ?? 0) > 0, note: "화면④에서 입력" },
@@ -298,6 +324,8 @@ export function buildReportModel(input: ReportInput): ReportModel {
       byOrderType,
       trend,
       daily,
+      prevDaily,
+      dailyAvg,
       dow,
       hours: ord?.byHour ?? [],
       ordersTruncated: ord?.truncated ?? false,
