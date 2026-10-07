@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
-import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
+import { ApiAuthError } from "@/lib/adminAuthCheck";
+import { requireBrandAccess } from "@/lib/brandAccess";
 import { decryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "@/lib/cmsAutomation/login";
 import { collectMonthlyData } from "@/lib/cmsAutomation/collect";
 import { CmsAutomationError } from "@/lib/cmsAutomation/types";
 import { saveMemberAggregates, fitMonthlyDataSize } from "@/lib/cmsAutomation/memberAggStore";
-import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
+import type { BrandCredentials, BrandMonthlyData } from "@/lib/types";
 
 // 그로스잇 브랜드 CMS 자동 수집 트리거 — 저장된 계정으로 헤드리스 브라우저 로그인 후(login.ts),
 // 로그인으로 얻은 쿠키로 JSON API를 호출해(collect.ts) brandMonthlyData에 raw 데이터를 씁니다.
@@ -39,7 +40,8 @@ function isValidYearMonth(v: unknown): v is string {
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { uid, profile } = await requireUser(req);
+    // 2026-10-06: 슈퍼 관리자 또는 이 브랜드의 담당자만(복수 담당자) — brandAccess.ts 참고.
+    const { uid, brand } = await requireBrandAccess(req, params.id);
     const body = (await req.json().catch(() => ({}))) as Partial<CollectRequestBody>;
     if (!isValidYearMonth(body.year_month)) {
       return NextResponse.json({ error: "year_month는 YYYY-MM 형식이어야 합니다." }, { status: 400 });
@@ -48,18 +50,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     const db = getAdminDb();
     const brandRef = db.collection("brands").doc(params.id);
-    const [brandSnap, credsSnap] = await Promise.all([
-      brandRef.get(),
-      db.collection("brandCredentials").doc(params.id).get(),
-    ]);
-
-    if (!brandSnap.exists) {
-      return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
-    }
-    const brand = brandSnap.data() as ReportBrand;
-    if (brand.organization_id !== profile.organization_id) {
-      return NextResponse.json({ error: "이 브랜드에 접근할 권한이 없습니다." }, { status: 403 });
-    }
+    const credsSnap = await db.collection("brandCredentials").doc(params.id).get();
     if (!credsSnap.exists) {
       return NextResponse.json(
         { error: "저장된 CMS 계정 정보가 없습니다. 브랜드 설정에서 CMS 계정을 먼저 등록해주세요." },
