@@ -121,6 +121,14 @@ export interface BrandFeeDefaults {
 export const DEFAULT_BENCHMARK_FEE_RATE = 10.8;
 export type BackfillStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
+export interface BrandAutoCollect {
+  year_month: string; // 대상 연월(YYYY-MM)
+  status: "SUCCESS" | "FAILED";
+  attempts: number; // 같은 연월에 대한 시도 횟수(성공하면 멈춤, 실패는 최대 3회까지 재시도)
+  at: number; // 마지막 시도 시각
+  error: string | null; // 실패 원인(짧게 잘라 저장)
+}
+
 export interface ReportBrand {
   id: ID;
   organization_id: ID;
@@ -161,6 +169,9 @@ export interface ReportBrand {
   // 가장 최근으로 "발행"(PPT 생성)까지 완료된 연월(YYYY-MM) — 화면④의 전월대비(MoM) 자동 조회,
   // 화면①의 "기존 발행 이력 유무" 표시에 사용. 백필로만 채워진 월은 포함하지 않습니다.
   last_published_month: string | null;
+  // 2026-10-07: 자동 월간 수집(/api/cron/collect-monthly)의 가장 최근 시도 결과 — 브랜드 관리 화면 표시와
+  // 실패 재시도 횟수 관리용. 한 번도 자동 수집된 적이 없으면 없음.
+  auto_collect?: BrandAutoCollect;
   brand_status: ReportBrandStatus; // INACTIVE = 목록에서 비활성화(soft-delete), 기존 데이터는 보존
   created_at: number;
   updated_at: number;
@@ -193,7 +204,7 @@ export interface BrandCredentials {
 // brandMonthlyData/{brandId}_{yyyyMM} — 브랜드×연월 단위로 CMS에서 수집한 raw 집계 데이터 1건.
 // 월간 발행 플로우(화면③→④)와 백필 둘 다 이 컬렉션에 씁니다. 8개 섹션 원본값은 data에 그대로 두고,
 // 사용자가 화면④에서 직접 고친 값(수수료 키인값 등)은 overrides에 별도로 보관해 원본과 구분합니다.
-export type BrandMonthlyDataSource = "MANUAL" | "BACKFILL";
+export type BrandMonthlyDataSource = "MANUAL" | "BACKFILL" | "AUTO"; // AUTO = 매월 자동 수집(Vercel Cron)
 
 export interface BrandMonthlyData {
   id: ID; // `${brand_id}_${year_month}`
