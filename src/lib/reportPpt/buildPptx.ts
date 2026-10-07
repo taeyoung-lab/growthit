@@ -150,7 +150,7 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
     s.addText(`${model.meta.brandName}\n${monthLabel(model.meta.yearMonth)} 성과 리포트`, { x: 0.7, y: 1.7, w: 7.5, h: 1.6, fontFace: FONT, fontSize: 36, bold: true, color: C.white, margin: 0, valign: "top", fit: "shrink", isTextBox: true });
     s.addText("성장을 잇다, 그로스잇", { x: 0.7, y: 3.5, w: 6, h: 0.4, fontFace: FONT, fontSize: 14, italic: true, color: "B8C4DA", margin: 0, isTextBox: true });
     const d = new Date(model.meta.generatedAt);
-    s.addText(`${model.meta.companyName}  ·  발행일 ${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`, { x: 0.7, y: 4.75, w: 7, h: 0.3, fontFace: FONT, fontSize: 10, color: "B8C4DA", margin: 0, isTextBox: true });
+    s.addText(`${model.meta.companyName}  ·  월 1회 · 담당자 요청 시 발행  ·  발행일 ${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`, { x: 0.7, y: 4.75, w: 7, h: 0.3, fontFace: FONT, fontSize: 10, color: "B8C4DA", margin: 0, isTextBox: true });
     s.addText("growthit, Powered by Wylie", { x: 0.7, y: 5.05, w: 6, h: 0.3, fontFace: FONT, fontSize: 10, bold: true, color: C.white, margin: 0, isTextBox: true });
   }
 
@@ -167,6 +167,41 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
       lines.slice(0, 4).map((t, i, a) => ({ text: t, options: { bullet: true, breakLine: i < a.length - 1 } })),
       { x: 0.5, y: 4.3, w: 9, h: 0.92, fontFace: FONT, fontSize: 10, color: C.ink, margin: 0, valign: "top", paraSpaceAfter: 2, fit: "shrink", isTextBox: true }
     );
+  }
+
+  // 2-1. 일평균 기준 지표 ────────────────────────────────────────────────
+  // 월 일수(28~31일)가 달라 월 합계만 비교하면 착시가 생기므로 일평균으로 다시 봅니다. 전월 일별 데이터가 있으면 같은 일자끼리 겹쳐 그립니다.
+  if (model.sales.dailyAvg) {
+    const da = model.sales.dailyAvg;
+    const s = frame(pres, model, "01+", "일평균 기준 핵심 지표", da.prevDays ? `월 일수 차이 보정 — 당월 ${da.days}일 · 전월 ${da.prevDays}일 기준 하루 평균` : "월 일수 차이를 보정한 하루 평균");
+    da.items.forEach((it, i) => {
+      const x = 0.5 + i * 2.28;
+      card(pres, s, x, 1.25, 2.12, 1.15, i === 0 ? C.navy : C.card);
+      const dark = i === 0;
+      s.addText(it.label, { x: x + 0.12, y: 1.32, w: 1.88, h: 0.36, fontFace: FONT, fontSize: 9, color: dark ? "B8C4DA" : C.gray, margin: 0, valign: "top", isTextBox: true });
+      const val = it.value == null ? "-" : it.unit === "원" ? `${fmtNum(Math.round(it.value / 10000))}만원` : `${fmtNum(it.value)}${it.unit}`;
+      s.addText(val, { x: x + 0.12, y: 1.66, w: 1.88, h: 0.42, fontFace: FONT, fontSize: 18, bold: true, color: dark ? C.white : C.navy, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
+      const up = (it.pct ?? 0) > 0;
+      const dc = it.pct == null ? (dark ? "B8C4DA" : C.gray) : it.pct === 0 ? C.gray : dark ? C.mint : up ? C.good : C.bad;
+      s.addText(it.pct == null ? "전월 비교 없음" : `전월 대비 ${fmtSigned(it.pct, "%")}`, { x: x + 0.12, y: 2.08, w: 1.88, h: 0.24, fontFace: FONT, fontSize: 9, bold: true, color: dc, margin: 0, isTextBox: true });
+    });
+    sectionLabel(s, "일평균 추이 — 일자별 그로스잇 매출 (만원)", 0.5, 2.55, 6);
+    const cur = model.sales.daily;
+    const prv = model.sales.prevDaily;
+    if (cur.length > 0) {
+      const n = Math.max(da.days, da.prevDays ?? 0, cur.length);
+      const labels = Array.from({ length: n }, (_, i) => String(i + 1));
+      const byDay = (list: typeof cur) => {
+        const m = new Map(list.map((d) => [Number(d.date.slice(8)), Math.round(d.amount / 10000)]));
+        return labels.map((_, i) => m.get(i + 1) ?? null);
+      };
+      const series = [{ name: `${monthLabel(model.meta.yearMonth)}`, labels, values: byDay(cur) as unknown as number[] }];
+      if (prv.length > 0) series.push({ name: `${monthLabel(model.meta.prevYearMonth)}`, labels, values: byDay(prv) as unknown as number[] });
+      s.addChart(pres.ChartType.line, series, {
+        x: 0.4, y: 2.8, w: 9.2, h: 2.1, chartColors: [C.mint, "A5B4CC"], lineSize: 2, lineDataSymbolSize: 4, showLegend: series.length > 1, legendPos: "b", showValue: false, ...chartBase,
+      } as PptxGenJS.IChartOpts);
+    } else empty(s, 0.5, 2.9, 9, 1.9);
+    s.addText("일평균 = 월 합계 ÷ 해당 월 일수. 월 합계 비교(핵심 요약)와 달리 31일·30일 같은 일수 차이의 영향을 받지 않습니다.", { x: 0.5, y: 4.95, w: 9, h: 0.25, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, isTextBox: true });
   }
 
   // 3. 매출·GMV (구성·추이) ────────────────────────────────────────────────
@@ -255,7 +290,7 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   // 7. 멤버십·고객 (회원·등급) ─────────────────────────────────────────────
   {
     const mb = model.members;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (회원)", "회원 규모와 세그먼트·등급 분포");
+    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (회원)", mb.levels.length > 0 ? "회원 규모와 세그먼트·등급 분포" : "회원 규모와 세그먼트 분포");
     const totalDelta = mb.total != null && mb.totalPrev != null ? ((mb.total - mb.totalPrev) / mb.totalPrev) * 100 : null;
     stat(pres, s, 0.5, 1.2, 2.2, 1.05, "전체 회원", `${fmtNum(mb.total)}명`, totalDelta != null ? `전월 대비 ${fmtSigned(totalDelta)}` : undefined);
     stat(pres, s, 2.8, 1.2, 2.2, 1.05, "신규 회원", `${fmtNum(mb.newMembers)}명`);
@@ -264,9 +299,16 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
     sectionLabel(s, "회원 세그먼트", 0.5, 2.45, 4.3);
     if (mb.segments.length > 0) addDoughnut(pres, s, 0.4, 2.7, 4.6, 2.45, mb.segments.map((x) => x.label), mb.segments.map((x) => x.count));
     else empty(s, 0.5, 2.8, 4.4, 2.2);
-    sectionLabel(s, "회원 등급 분포 (명)", 5.3, 2.45, 4.3);
-    if (mb.levels.length > 0) addBar(pres, s, 5.2, 2.7, 4.4, 2.45, mb.levels.map((x) => x.label), mb.levels.map((x) => x.count), { name: "회원 수", color: C.navy });
-    else empty(s, 5.3, 2.8, 4.3, 2.2);
+    if (mb.levels.length > 0) {
+      sectionLabel(s, "회원 등급 분포 (명)", 5.3, 2.45, 4.3);
+      addBar(pres, s, 5.2, 2.7, 4.4, 2.45, mb.levels.map((x) => x.label), mb.levels.map((x) => x.count), { name: "회원 수", color: C.navy });
+    } else {
+      // 등급제가 없는 브랜드: 빈 등급 차트 대신 세그먼트 상세표를 보여줍니다.
+      sectionLabel(s, "세그먼트별 회원 수", 5.3, 2.45, 4.3);
+      if (mb.segments.length > 0) {
+        table(pres, s, 5.3, 2.8, 4.2, [1.9, 1.3, 1.0], ["세그먼트", "회원 수", "비중"], mb.segments.map((x) => [x.label, `${fmtNum(x.count)}명`, fmtPct(x.rate)]), { fontSize: 9.5, rowH: 0.36 });
+      } else empty(s, 5.3, 2.8, 4.3, 2.2);
+    }
   }
 
   // 8. 멤버십·고객 (메뉴·성별·연령) ─────────────────────────────────────────
@@ -287,12 +329,12 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   }
 
   // 9. 멤버십·고객 (구매 행동) ─────────────────────────────────────────────
+  // 회원별 구매 집계가 없으면(월 주문이 매우 많은 대형 브랜드·수집 전) 빈 안내 슬라이드를 만들지 않고 건너뜁니다
+  // (2026-10-07). 제외 사실은 마지막 "데이터 체크리스트"에 '제외'로 남습니다.
   {
     const b = model.members.buyers;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (구매 행동)", b ? `${b.months.map(monthShort).join("·")} 구매 집계 기준${b.truncated ? " (일부만 집계)" : ""}` : model.sales.ordersSampled ? "월 주문이 매우 많은 브랜드는 제공하지 않습니다" : "회원 구매 집계 데이터가 없습니다");
-    if (!b) {
-      empty(s, 0.5, 1.4, 9, 3.5, model.sales.ordersSampled ? "월 주문이 매우 많은 브랜드는 일부 주문만으로 재구매율·구매 빈도를 계산하면 실제보다 크게 낮게 나와, 이 섹션은 제공하지 않습니다" : "이 달은 회원별 구매 집계가 저장돼 있지 않습니다 — 데이터를 다시 수집하면 표시됩니다");
-    } else {
+    if (b) {
+      const s = frame(pres, model, "05", "멤버십 · 고객 지표 (구매 행동)", `${b.months.map(monthShort).join("·")} 구매 집계 기준${b.truncated ? " (일부만 집계)" : ""}`);
       sectionLabel(s, "구매 빈도 (기간 합산 주문 횟수 기준)", 0.5, 1.2, 5);
       (b.frequency ?? []).forEach((f, i) => {
         const x = 0.5 + i * 1.9;
@@ -313,13 +355,16 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   }
 
   // 10. 쿠폰·이벤트 ───────────────────────────────────────────────────────
-  {
+  // 쿠폰·이벤트 둘 다 수집되지 않았으면 슬라이드를 만들지 않습니다.
+  if (model.members.coupons || model.members.events) {
     const mb = model.members;
     const s = frame(pres, model, "05", "멤버십 · 고객 지표 (쿠폰 · 이벤트)", "혜택 운영 현황");
+    // 발급은 많은데 사용 0건이면 CMS가 사용 건수를 집계하지 못한 경우가 많아 0건 대신 "-"로 표시합니다.
+    const usageMissing = !!mb.coupons && mb.coupons.issued > 0 && mb.coupons.used === 0;
     if (mb.coupons) {
       stat(pres, s, 0.5, 1.2, 2.1, 1.1, "쿠폰 발급", `${fmtNum(mb.coupons.issued)}건`);
-      stat(pres, s, 2.7, 1.2, 2.1, 1.1, "쿠폰 사용", `${fmtNum(mb.coupons.used)}건`, `사용률 ${fmtPct(mb.coupons.rate)}`);
-      stat(pres, s, 4.9, 1.2, 2.1, 1.1, "쿠폰 할인액", fmtWon(mb.coupons.dcAmt));
+      stat(pres, s, 2.7, 1.2, 2.1, 1.1, "쿠폰 사용", usageMissing ? "-" : `${fmtNum(mb.coupons.used)}건`, usageMissing ? "CMS 사용 집계 없음" : `사용률 ${fmtPct(mb.coupons.rate)}`);
+      stat(pres, s, 4.9, 1.2, 2.1, 1.1, "쿠폰 할인액", usageMissing ? "-" : fmtWon(mb.coupons.dcAmt));
     } else empty(s, 0.5, 1.2, 6.5, 1.1, "쿠폰 통계를 수집하지 못했습니다");
     stat(pres, s, 7.1, 1.2, 2.4, 1.1, "진행 중 이벤트", mb.events ? `${fmtNum(mb.events.running)}개` : "-", mb.events ? `전체 ${mb.events.total}개 등록` : undefined);
     sectionLabel(s, "쿠폰 사용 TOP 5 매장", 0.5, 2.5, 4.3);
@@ -355,8 +400,8 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
   // 12. 데이터 체크리스트 ──────────────────────────────────────────────────
   {
     const s = frame(pres, model, "07", "데이터 체크리스트", "이 리포트의 수치가 어떤 데이터에 근거하는지");
-    const rows = model.checklist.map((c) => [c.ok ? "확인" : "점검 필요", c.item, c.note]);
-    table(pres, s, 0.5, 1.25, 9, [1.1, 3.1, 4.8], ["상태", "항목", "비고"], rows, { fontSize: 8.5, rowH: 0.31, align: ["center", "left", "left"], cellColor: (t, c) => (c === 0 ? (t === "확인" ? C.good : C.warn) : undefined) });
+    const rows = model.checklist.map((c) => [c.skipped ? "제외" : c.ok ? "확인" : "점검 필요", c.item, c.note]);
+    table(pres, s, 0.5, 1.25, 9, [1.1, 3.1, 4.8], ["상태", "항목", "비고"], rows, { fontSize: 8.5, rowH: 0.31, align: ["center", "left", "left"], cellColor: (t, c) => (c === 0 ? (t === "확인" ? C.good : t === "제외" ? C.gray : C.warn) : undefined) });
   }
 
   const out = (await pres.write({ outputType: "nodebuffer" })) as unknown as Buffer;
