@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
-import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
-import type { BrandMonthlyData, ReportBrand } from "@/lib/types";
+import { ApiAuthError } from "@/lib/adminAuthCheck";
+import { requireBrandAccess } from "@/lib/brandAccess";
+import type { BrandMonthlyData } from "@/lib/types";
 
 // Monthly Report 발행 화면①(브랜드/월 선택)에서 "이 브랜드·월이 이미 수집/발행된 적 있는지"를
 // 보여주기 위한 조회 전용 엔드포인트입니다. brandMonthlyData는 클라이언트 Firestore 규칙이 아직
@@ -14,22 +15,13 @@ function isValidYearMonth(v: unknown): v is string {
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { profile } = await requireUser(req);
+    await requireBrandAccess(req, params.id);
     const yearMonth = req.nextUrl.searchParams.get("year_month");
     if (!isValidYearMonth(yearMonth)) {
       return NextResponse.json({ error: "year_month는 YYYY-MM 형식이어야 합니다." }, { status: 400 });
     }
 
     const db = getAdminDb();
-    const brandSnap = await db.collection("brands").doc(params.id).get();
-    if (!brandSnap.exists) {
-      return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
-    }
-    const brand = brandSnap.data() as ReportBrand;
-    if (brand.organization_id !== profile.organization_id) {
-      return NextResponse.json({ error: "이 브랜드에 접근할 권한이 없습니다." }, { status: 403 });
-    }
-
     const docId = `${params.id}_${yearMonth}`;
     const snap = await db.collection("brandMonthlyData").doc(docId).get();
     if (!snap.exists) {
