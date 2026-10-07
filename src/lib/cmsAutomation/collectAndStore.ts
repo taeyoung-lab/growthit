@@ -3,6 +3,7 @@ import { decryptCmsPassword } from "@/lib/cmsCredentials";
 import { loginToCms } from "@/lib/cmsAutomation/login";
 import { collectMonthlyData } from "@/lib/cmsAutomation/collect";
 import { saveMemberAggregates, fitMonthlyDataSize } from "@/lib/cmsAutomation/memberAggStore";
+import { saveBreakdown } from "@/lib/cmsAutomation/breakdownStore";
 import type { BrandCredentials, BrandMonthlyData, BrandMonthlyDataSource, ReportBrand } from "@/lib/types";
 
 // 한 브랜드의 한 달치 데이터를 CMS에서 수집해 brandMonthlyData에 저장하는 공통 로직(로그인 → 수집 → 저장 →
@@ -74,6 +75,13 @@ export async function collectAndStoreMonth(opts: {
       console.warn(`[collectAndStoreMonth ${brandId}] 회원 집계 저장 실패`, e);
     }
   }
+  // 매장·메뉴 전체 목록(압축본)도 별도 컬렉션에 저장 — 실패해도 본 데이터는 유지합니다.
+  if (collected.breakdown) {
+    try {
+      await saveBreakdown(db, { brandId, organizationId: brand.organization_id, yearMonth, breakdown: collected.breakdown });
+    } catch (e) {
+      console.warn(`[collectAndStoreMonth ${brandId}] 매장·메뉴 목록 저장 실패`, e);
+    }
+  }
   return data;
 }
-
