@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAdminDb } from "@/lib/firebase/admin";
-import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
+import { ApiAuthError } from "@/lib/adminAuthCheck";
+import { requireBrandAccess } from "@/lib/brandAccess";
 import { runBackfillBatch } from "@/lib/cmsAutomation/backfill";
 import { CmsAutomationError } from "@/lib/cmsAutomation/types";
-import type { ReportBrand } from "@/lib/types";
 
 // 그로스잇 브랜드 백필(서비스 오픈일~전월 과거 데이터 일괄 수집) 트리거 — 2026-10-01 확정 사항
 // (화면 설계 질문지 7번) 그대로: 화면④ 리뷰 없이 CMS 원본값을 brandMonthlyData에 바로 저장하고,
@@ -27,17 +26,8 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { profile } = await requireUser(req);
-
-    const db = getAdminDb();
-    const brandSnap = await db.collection("brands").doc(params.id).get();
-    if (!brandSnap.exists) {
-      return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
-    }
-    const brand = brandSnap.data() as ReportBrand;
-    if (brand.organization_id !== profile.organization_id) {
-      return NextResponse.json({ error: "이 브랜드에 접근할 권한이 없습니다." }, { status: 403 });
-    }
+    // 2026-10-06: 슈퍼 관리자 또는 이 브랜드의 담당자만(복수 담당자) — brandAccess.ts 참고.
+    const { brand } = await requireBrandAccess(req, params.id);
     if (!brand.service_open_date) {
       return NextResponse.json(
         { error: "서비스 오픈일이 등록된 브랜드만 백필할 수 있습니다." },
