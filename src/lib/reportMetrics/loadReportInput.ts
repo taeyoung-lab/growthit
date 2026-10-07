@@ -33,6 +33,17 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
   const prevOverrides = (prevDoc?.exists ? (prevDoc.data() as BrandMonthlyData).overrides : null) as ReportOverrides | null;
   const prevActions: ActionItem[] = Array.isArray(prevOverrides?.actions) ? (prevOverrides!.actions as ActionItem[]) : [];
 
+  // 전월 일별 앱 매출(일평균·일별 추이 비교용)
+  const prevData = prevDoc?.exists ? ((prevDoc.data() as BrandMonthlyData).data as Record<string, unknown> | undefined) : undefined;
+  const prevList = (prevData?.dashboard as { recentSalesList?: unknown } | undefined)?.recentSalesList;
+  const prevYmStr = monthsBefore(yearMonth, 1);
+  const prevDaily = Array.isArray(prevList)
+    ? (prevList as Record<string, unknown>[])
+        .filter((r) => String(r.yyyymmdd ?? "").startsWith(prevYmStr) && (r.storeId === undefined || r.storeId === 0))
+        .map((r) => ({ date: String(r.yyyymmdd), amount: Number(r.totalSalesAmt) || 0, orders: Number(r.orderCnt) || 0 }))
+        .sort((a, b) => a.date.localeCompare(b.date))
+    : [];
+
   // 회원 구매 집계는 최근 3개월(당월 포함)만 읽습니다 — 없는 달은 건너뜁니다.
   const memberMonths: MonthMembers[] = [];
   for (const ym of [monthsBefore(yearMonth, 2), monthsBefore(yearMonth, 1), yearMonth]) {
@@ -59,6 +70,7 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
     members,
     overrides: (cur.overrides ?? {}) as ReportOverrides,
     prevActions,
+    prevDaily,
     generatedAt: Date.now(),
   };
 }
