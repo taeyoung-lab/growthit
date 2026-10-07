@@ -1,410 +1,335 @@
-// 리포트 모델(ReportModel) → PPT(.pptx). 2026-10-05 결정: QR오더 PPT 자산 대신 와일리/그로스잇 기본 스타일
-// (Navy #14213D + Mint #2EC4B6)로 먼저 만들고, 담당자가 새 템플릿을 올리면 교체합니다.
-// 서버(Node)에서 pptxgenjs로 생성해 바이너리로 내려줍니다 — 차트는 PowerPoint 네이티브 차트라 열어서 수정할 수 있습니다.
+// 웹 리포트(HTML 한 장) — 팀 월간 리포트 포맷(요약 → 핵심 지표 → 주목할 변화+액션 → 지난 제안 추적 → 데이터 기준)을
+// 그로스잇 수집 데이터로 만듭니다. 서버에서 문자열로 완성해 .html 파일로 내려주므로 받은 사람은 파일만 열면 됩니다.
+// 1단계 범위: CMS 집계값으로 계산 가능한 지표만 씁니다(주문 원본이 필요한 지표는 만들지 않고 "다음 단계"로 안내).
 
-import PptxGenJS from "pptxgenjs";
-import { fmtNum, fmtPct, fmtSigned, fmtWon, fmtWonShort, monthLabel, monthShort } from "@/lib/reportMetrics/format";
-import type { Kpi, ReportModel } from "@/lib/reportMetrics/types";
+import type { MonthSnapshot, ReportInput, ReportModel } from "@/lib/reportMetrics/types";
+import { monthLabel } from "@/lib/reportMetrics/format";
+import { snapshotFromData } from "@/lib/reportMetrics/snapshot";
 
-const C = {
-  navy: "14213D",
-  mint: "2EC4B6",
-  mintDark: "1A9E92",
-  ink: "1B2340",
-  gray: "6B7280",
-  line: "E5E7EB",
-  card: "F3F6FA",
-  white: "FFFFFF",
-  warn: "D97706",
-  bad: "DC2626",
-  good: "059669",
-  mintSoft: "DDF5F2",
-  navySoft: "DCE3F0",
+const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+const nf = (n: number) => Math.round(n).toLocaleString("ko-KR");
+const daysIn = (ym: string) => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
+const std = (a: number[]) => {
+  const m = mean(a);
+  return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length);
 };
-const FONT = "Malgun Gothic";
-const W = 10;
-const H = 5.625;
-const PALETTE = [C.mint, C.navy, "5B7DB1", "A5B4CC", "F5B94B", "9AD9D2"];
-
-type Slide = PptxGenJS.Slide;
-
-function deltaText(k: Kpi): { text: string; color: string } {
-  if (k.pct == null) return { text: "전월 비교 없음", color: C.gray };
-  const unit = k.unit === "%" ? "%p" : "%";
-  const up = k.pct > 0;
-  const flat = k.pct === 0;
-  return { text: `전월 대비 ${fmtSigned(k.pct, unit)}`, color: flat ? C.gray : up ? C.good : C.bad };
+// 1억 1,213만원 / 3,363만원 / 4,299원
+function won(n: number): string {
+  const a = Math.abs(n);
+  if (a >= 1e8) {
+    const eok = Math.floor(a / 1e8);
+    const man = Math.round((a % 1e8) / 1e4);
+    return `${n < 0 ? "-" : ""}${eok}억${man > 0 ? ` ${nf(man)}만원` : "원"}`;
+  }
+  if (a >= 1e4) return `${n < 0 ? "-" : ""}${nf(a / 1e4)}만원`;
+  return `${nf(n)}원`;
 }
-function kpiValue(k: Kpi): string {
-  if (k.value == null) return "-";
-  if (k.unit === "원") return fmtWonShort(k.value) === fmtNum(k.value) ? fmtWon(k.value) : `${fmtWonShort(k.value)}원`;
-  if (k.unit === "%") return fmtPct(k.value, 2);
-  return `${fmtNum(k.value)}${k.unit}`;
-}
+const pctStr = (v: number, d = 1) => `${v > 0 ? "+" : ""}${v.toFixed(d)}%`;
+const ppStr = (v: number, d = 1) => `${v > 0 ? "+" : ""}${v.toFixed(d)}%p`;
 
-function frame(pres: PptxGenJS, model: ReportModel, no: string, title: string, subtitle?: string): Slide {
-  const s = pres.addSlide();
-  s.background = { color: C.white };
-  s.addShape(pres.ShapeType.ellipse, { x: 0.5, y: 0.34, w: 0.42, h: 0.42, fill: { color: C.mint }, line: { color: C.mint } });
-  s.addText(no, { x: 0.5, y: 0.34, w: 0.42, h: 0.42, align: "center", valign: "middle", fontFace: FONT, fontSize: 11, bold: true, color: C.navy, margin: 0, isTextBox: true });
-  s.addText(title, { x: 1.05, y: 0.3, w: 8.4, h: 0.5, fontFace: FONT, fontSize: 22, bold: true, color: C.navy, margin: 0, valign: "middle", isTextBox: true });
-  if (subtitle) s.addText(subtitle, { x: 1.05, y: 0.8, w: 8.4, h: 0.3, fontFace: FONT, fontSize: 11, color: C.gray, margin: 0, isTextBox: true });
-  s.addText(`growthit, Powered by Wylie  ·  ${model.meta.brandName} ${monthLabel(model.meta.yearMonth)} 성과 리포트`, {
-    x: 0.5, y: 5.25, w: 7, h: 0.25, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, isTextBox: true,
-  });
-  return s;
+// ── 월별 지표(스냅샷 → 값) ─────────────────────────────────────────────────
+type MetricKey = "appPayDay" | "appOrdersDay" | "ticket" | "newMembersDay" | "appShare";
+interface MetricDef {
+  key: MetricKey;
+  name: string;
+  domain: string;
+  mode: "growth" | "level"; // growth: 전월 대비 증감률을 평소와 비교, level: 수준 자체를 비교
+  value: (s: MonthSnapshot) => number | null;
 }
+const METRICS: MetricDef[] = [
+  { key: "appPayDay", name: "일평균 앱결제액 성장률", domain: "sales", mode: "growth", value: (s) => (s.appPay != null ? s.appPay / daysIn(s.yearMonth) : null) },
+  { key: "appOrdersDay", name: "일평균 앱 주문수 성장률", domain: "sales", mode: "growth", value: (s) => (s.appOrders != null ? s.appOrders / daysIn(s.yearMonth) : null) },
+  { key: "ticket", name: "객단가", domain: "ticket", mode: "level", value: (s) => (s.appPay != null && s.appOrders ? s.appPay / s.appOrders : null) },
+  { key: "newMembersDay", name: "일평균 신규 가입회원 증감률", domain: "member", mode: "growth", value: (s) => (s.newMembers != null ? s.newMembers / daysIn(s.yearMonth) : null) },
+  { key: "appShare", name: "앱 비중", domain: "share", mode: "level", value: (s) => s.appShare },
+];
 
-function card(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, h: number, fill: string = C.card) {
-  s.addShape(pres.ShapeType.roundRect, { x, y, w, h, fill: { color: fill }, line: { color: fill }, rectRadius: 0.08 });
-}
-
-function kpiCard(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, h: number, k: Kpi, dark = false) {
-  card(pres, s, x, y, w, h, dark ? C.navy : C.card);
-  const d = deltaText(k);
-  s.addText(k.label, { x: x + 0.15, y: y + 0.1, w: w - 0.3, h: 0.28, fontFace: FONT, fontSize: 10, color: dark ? "B8C4DA" : C.gray, margin: 0, isTextBox: true });
-  s.addText(kpiValue(k), { x: x + 0.15, y: y + 0.38, w: w - 0.3, h: h - 0.85, fontFace: FONT, fontSize: 20, bold: true, color: dark ? C.white : C.navy, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-  s.addText(d.text, { x: x + 0.15, y: y + h - 0.42, w: w - 0.3, h: 0.28, fontFace: FONT, fontSize: 9, bold: true, color: dark ? (d.color === C.gray ? "B8C4DA" : C.mint) : d.color, margin: 0, isTextBox: true });
-}
-
-function stat(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, h: number, label: string, value: string, note?: string) {
-  card(pres, s, x, y, w, h);
-  s.addText(label, { x: x + 0.12, y: y + 0.08, w: w - 0.24, h: 0.26, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
-  s.addText(value, { x: x + 0.12, y: y + 0.32, w: w - 0.24, h: h - (note ? 0.8 : 0.45), fontFace: FONT, fontSize: 18, bold: true, color: C.navy, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-  if (note) s.addText(note, { x: x + 0.12, y: y + h - 0.45, w: w - 0.24, h: 0.36, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, valign: "top", isTextBox: true });
+interface Insight {
+  key: MetricKey;
+  name: string;
+  domain: string;
+  cur: string;
+  base: string;
+  delta: string;
+  down: boolean;
+  z: number;
+  n: number; // 평소 값 산출에 쓴 개월 수
+  facts: string[];
+  title: string;
+  how: string;
+  kpi: string;
+  rawCur: number; // 추적용 — 제안 시점 값
 }
 
-function empty(s: Slide, x: number, y: number, w: number, h: number, text = "데이터가 없습니다") {
-  s.addText(text, { x, y, w, h, align: "center", valign: "middle", fontFace: FONT, fontSize: 11, color: C.gray, isTextBox: true });
+// idx번째 달(snaps[idx])을 기준으로 지표를 평가합니다. 평소 값은 그 이전 달들만 씁니다.
+function evalMetric(m: MetricDef, snaps: MonthSnapshot[], idx: number): { cur: number; base: number; sd: number; z: number; n: number } | null {
+  const vals = snaps.slice(0, idx + 1).map((s) => m.value(s));
+  if (vals[idx] == null) return null;
+  if (m.mode === "level") {
+    const prior = vals.slice(0, idx).filter((v): v is number => v != null).slice(-3);
+    if (prior.length < 2) return null;
+    const base = mean(prior);
+    const sd = Math.max(std(prior), Math.abs(base) * 0.01);
+    return { cur: vals[idx]!, base, sd, z: (vals[idx]! - base) / sd, n: prior.length };
+  }
+  const g: number[] = [];
+  for (let i = 1; i <= idx; i++) {
+    const a = vals[i - 1];
+    const b = vals[i];
+    g.push(a != null && b != null && a > 0 ? ((b / a) - 1) * 100 : NaN);
+  }
+  const cur = g[g.length - 1];
+  const prior = g.slice(0, -1).filter((v) => Number.isFinite(v)).slice(-3);
+  if (!Number.isFinite(cur) || prior.length < 2) return null;
+  const base = mean(prior);
+  const sd = Math.max(std(prior), 1); // 최소 1%p — 변동이 거의 없을 때 z가 폭주하지 않도록
+  return { cur, base, sd, z: (cur - base) / sd, n: prior.length };
 }
 
-function sectionLabel(s: Slide, text: string, x: number, y: number, w = 4) {
-  s.addText(text, { x, y, w, h: 0.28, fontFace: FONT, fontSize: 11, bold: true, color: C.navy, margin: 0, isTextBox: true });
+function buildInsight(m: MetricDef, e: NonNullable<ReturnType<typeof evalMetric>>, snaps: MonthSnapshot[], idx: number): Insight {
+  const s = snaps[idx];
+  const p = snaps[idx - 1];
+  const up = e.z >= 0;
+  const facts: string[] = [];
+  let cur = "";
+  let base = "";
+  let delta = "";
+  let title = "";
+  let how = "";
+  let kpi = "";
+  const curTxt = (v: number) => (m.mode === "growth" ? pctStr(v) : m.key === "ticket" ? `${nf(v)}원` : `${v.toFixed(2)}%`);
+  cur = curTxt(e.cur);
+  base = curTxt(e.base);
+  delta = m.mode === "growth" ? ppStr(e.cur - e.base) : m.key === "ticket" ? `${e.cur - e.base > 0 ? "+" : ""}${nf(e.cur - e.base)}원` : ppStr(e.cur - e.base, 2);
+  if (m.key === "appPayDay") {
+    const c = m.value(s)!;
+    const pv = m.value(p);
+    facts.push(`일평균 앱결제액 ${won(c)}${pv != null ? ` (전월 ${won(pv)})` : ""}, 월 합계 ${won(s.appPay!)}`, `전월 대비 ${pctStr(e.cur)} — 최근 ${e.n}개월 평균 ${pctStr(e.base)}`);
+    title = up ? "성장 가속 구간: 증가분이 나온 매장·메뉴 확인" : "성장 둔화 대응: 매장별 성장률 공유";
+    how = up ? "매장별 앱결제액 증감 상위·하위 매장을 뽑아 운영 사례를 정리해 확산 (매장별 집계는 다음 단계 데이터)" : "매장별 전월 대비 성장률 랭킹을 점주에게 공유 → 상위 매장의 앱 안내·쿠폰 운영 방식 확산";
+    kpi = `다음 달 일평균 앱결제액 성장률 (이번 달 ${pctStr(e.cur)})`;
+  } else if (m.key === "appOrdersDay") {
+    const c = m.value(s)!;
+    const pv = m.value(p);
+    facts.push(`일평균 앱 주문 ${nf(c)}건${pv != null ? ` (전월 ${nf(pv)}건)` : ""}`, `전월 대비 ${pctStr(e.cur)} — 최근 ${e.n}개월 평균 ${pctStr(e.base)}`);
+    title = up ? "주문 증가세 유지: 피크 시간대 안정 운영 점검" : "주문 증가세 둔화: 재방문 유도 점검";
+    how = up ? "주문이 몰리는 시간대·매장의 조리·픽업 지연 여부를 점검" : "최근 1회 구매 후 미복귀 회원 대상 리마인드 푸시·쿠폰 테스트 (회원 단위 집계는 다음 단계 데이터)";
+    kpi = `다음 달 일평균 앱 주문 성장률 (이번 달 ${pctStr(e.cur)})`;
+  } else if (m.key === "ticket") {
+    const pv = m.value(p);
+    facts.push(`객단가 ${nf(e.cur)}원${pv != null ? ` (전월 ${nf(pv)}원)` : ""}`, `최근 ${e.n}개월 평균 ${nf(e.base)}원 대비 ${e.cur - e.base > 0 ? "+" : ""}${nf(e.cur - e.base)}원`);
+    title = up ? "객단가 상승 유지: 상승 요인(대용량·푸드) 확인" : "객단가 하락 대응: 대용량·푸드 세트 노출 점검";
+    how = up ? "주문 단가가 오른 메뉴 구성(대용량·푸드 추가)을 확인해 앱 상단 노출에 반영 (메뉴별 수량은 다음 단계 데이터)" : "앱 메인·주문 완료 화면에 대용량 옵션·푸드 추가 제안을 노출하고 객단가 변화를 비교";
+    kpi = `다음 달 객단가 (이번 달 ${nf(e.cur)}원)`;
+  } else if (m.key === "newMembersDay") {
+    const c = m.value(s)!;
+    const pv = m.value(p);
+    facts.push(`일평균 신규 가입회원 ${nf(c)}명${pv != null ? ` (전월 ${nf(pv)}명)` : ""}`, `전월 대비 ${pctStr(e.cur)} — 최근 ${e.n}개월 평균 ${pctStr(e.base)}`);
+    title = up ? "신규 유입 상위 매장 사례를 하위 매장에 확산" : "신규 유입 둔화: 매장 내 앱 안내 점검";
+    how = "신규 가입이 많은 매장의 매장 내 앱 안내 방식(포스터·계산대 안내)을 확인해 하위 매장에 동일 적용 (매장별 신규 가입은 다음 단계 데이터)";
+    kpi = `다음 달 일평균 신규 가입회원 증감률 (이번 달 ${pctStr(e.cur)})`;
+  } else {
+    facts.push(`앱 비중 ${e.cur.toFixed(2)}% (전체 매출 대비 그로스잇 앱결제액)`, `최근 ${e.n}개월 평균 ${e.base.toFixed(2)}% 대비 ${ppStr(e.cur - e.base, 2)}`);
+    title = up ? "앱 비중 상승 유지: 앱 주문 비중이 높은 매장 사례 확산" : "앱 비중 하락 대응: 매장 내 앱 주문 유도 점검";
+    how = "앱 비중이 낮은 매장의 앱 안내·쿠폰 운영 현황을 점검 (매장별 앱 비중은 다음 단계 데이터)";
+    kpi = `다음 달 앱 비중 (이번 달 ${e.cur.toFixed(2)}%)`;
+  }
+  return { key: m.key, name: m.name, domain: m.domain, cur, base, delta, down: !up, z: e.z, n: e.n, facts, title, how, kpi, rawCur: e.cur };
 }
 
-const chartBase = {
-  catAxisLabelFontFace: FONT,
-  valAxisLabelFontFace: FONT,
-  catAxisLabelFontSize: 9,
-  valAxisLabelFontSize: 8,
-  catAxisLabelColor: C.gray,
-  valAxisLabelColor: C.gray,
-  valGridLine: { color: C.line, size: 0.5 },
-  catGridLine: { style: "none" as const },
-  dataLabelFontFace: FONT,
-  dataLabelFontSize: 8,
-  dataLabelColor: C.ink,
-  legendFontFace: FONT,
-  legendFontSize: 9,
-  legendColor: C.ink,
-  titleFontFace: FONT,
-  titleFontSize: 11,
-  titleColor: C.navy,
-};
-
-function addBar(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, h: number, labels: string[], values: number[], opts: { name: string; color?: string; colors?: string[]; horizontal?: boolean; format?: string; title?: string; showValue?: boolean }) {
-  s.addChart(pres.ChartType.bar, [{ name: opts.name, labels, values }], {
-    x, y, w, h, barDir: opts.horizontal ? "bar" : "col", chartColors: opts.colors ?? [opts.color ?? C.mint],
-    showLegend: false, showValue: opts.showValue ?? true, dataLabelPosition: "outEnd", dataLabelFormatCode: opts.format ?? "#,##0", valAxisLabelFormatCode: opts.format ?? "#,##0",
-    showTitle: !!opts.title, title: opts.title, barGapWidthPct: 60, ...chartBase,
-  } as PptxGenJS.IChartOpts);
+// 점수 = |z| (나빠진 방향은 ×1.3). 같은 영역은 1개만, 최대 3개.
+function pickInsights(snaps: MonthSnapshot[], idx: number): Insight[] {
+  const cands = METRICS.map((m) => {
+    const e = evalMetric(m, snaps, idx);
+    return e ? { m, e, score: Math.abs(e.z) * (e.z < 0 ? 1.3 : 1) } : null;
+  }).filter((x): x is NonNullable<typeof x> => x !== null);
+  cands.sort((a, b) => b.score - a.score);
+  const used = new Set<string>();
+  const out: Insight[] = [];
+  for (const c of cands) {
+    if (used.has(c.m.domain)) continue;
+    used.add(c.m.domain);
+    out.push(buildInsight(c.m, c.e, snaps, idx));
+    if (out.length >= 3) break;
+  }
+  return out;
 }
 
-function addDoughnut(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, h: number, labels: string[], values: number[], title?: string) {
-  s.addChart(pres.ChartType.doughnut, [{ name: title ?? "비중", labels, values }], {
-    x, y, w, h, holeSize: 58, chartColors: PALETTE.slice(0, labels.length), showLegend: true, legendPos: "r", showPercent: true, showValue: false,
-    showTitle: !!title, title, dataLabelColor: C.white, dataLabelFontSize: 8, dataLabelFontFace: FONT, dataBorder: { pt: 1, color: C.white },
-    legendFontFace: FONT, legendFontSize: 9, legendColor: C.ink, titleFontFace: FONT, titleFontSize: 11, titleColor: C.navy,
-  } as PptxGenJS.IChartOpts);
+function weekendRatio(list: { date: string; orders: number }[]): { ratio: number; we: number; wd: number } | null {
+  const we = list.filter((d) => [0, 6].includes(new Date(`${d.date}T00:00:00`).getDay()));
+  const wd = list.filter((d) => ![0, 6].includes(new Date(`${d.date}T00:00:00`).getDay()));
+  if (we.length === 0 || wd.length === 0) return null;
+  const a = mean(we.map((d) => d.orders));
+  const b = mean(wd.map((d) => d.orders));
+  return b > 0 ? { ratio: a / b, we: a, wd: b } : null;
 }
 
-function table(pres: PptxGenJS, s: Slide, x: number, y: number, w: number, colW: number[], head: string[], rows: string[][], opts: { fontSize?: number; rowH?: number; align?: ("left" | "center" | "right")[]; cellColor?: (text: string, col: number) => string | undefined } = {}) {
-  const fs = opts.fontSize ?? 9;
-  const al = opts.align ?? head.map((_, i) => (i === 0 ? "left" : "right"));
-  const cell = (text: string, i: number, header: boolean): PptxGenJS.TableCell => ({
-    text,
-    options: {
-      fontFace: FONT, fontSize: fs, bold: header || (!!opts.cellColor && !!opts.cellColor(text, i)), color: header ? C.white : (opts.cellColor?.(text, i) ?? C.ink), fill: { color: header ? C.navy : C.white },
-      align: al[i], valign: "middle", border: [{ type: "none" }, { type: "none" }, { type: "solid", pt: 0.5, color: C.line }, { type: "none" }], margin: [0.03, 0.08, 0.03, 0.08],
-    },
-  });
-  s.addTable([head.map((t, i) => cell(t, i, true)), ...rows.map((r) => r.map((t, i) => cell(t, i, false)))], { x, y, w, colW, rowH: opts.rowH ?? 0.28 });
-}
+const CSS = `
+:root{--bg:#F4F6FA;--paper:#fff;--ink:#14213D;--muted:#5C6678;--line:#DDE3EE;--accent:#2EC4B6;--accent-ink:#0B7F74;--accent-soft:#E3F6F4;--navy:#14213D;--up:#0B7F74;--down:#C2410C;--chip:#EDF1F7;--f:'IBM Plex Sans KR',-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;--fn:'IBM Plex Mono',ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0F1626;--paper:#17213A;--ink:#EAF0FA;--muted:#9FAAC0;--line:#2A3552;--accent:#2EC4B6;--accent-ink:#5FE0D3;--accent-soft:#16363A;--navy:#EAF0FA;--up:#5FE0D3;--down:#F29A72;--chip:#212C47}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f);font-size:15px;line-height:1.6;padding:24px 16px 64px}
+.wrap{max-width:920px;margin:0 auto;display:flex;flex-direction:column;gap:28px}h1,h2,h3{margin:0;line-height:1.3;text-wrap:balance}h1{font-size:26px}h2{font-size:18px}h3{font-size:16px}
+.num{font-family:var(--fn);font-variant-numeric:tabular-nums}.eyebrow{font-size:12px;letter-spacing:.08em;color:var(--muted);font-weight:600}.muted{color:var(--muted)}.note{font-size:12.5px;color:var(--muted)}
+.summary{background:var(--accent-soft);border-radius:12px;padding:18px 20px;font-size:16px;font-weight:500}
+section{display:flex;flex-direction:column;gap:14px}.sec-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px}
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.kpi{background:var(--paper);padding:14px 14px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}.kpi .l{font-size:12.5px;color:var(--muted)}.kpi .v{font-size:19px;font-weight:600}.kpi .s{font-size:12px;color:var(--muted)}
+.d{font-size:13px;font-weight:600}.d.up{color:var(--up)}.d.down{color:var(--down)}
+.growth{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:16px}.box{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:16px 18px;min-width:0}
+.chart svg{width:100%;height:auto;display:block}.chart text{fill:var(--muted);font-family:var(--fn);font-size:11px}.chart .lbl{fill:var(--ink);font-weight:600}
+.insight{background:var(--paper);border:1px solid var(--line);border-radius:12px;overflow:hidden}.insight .top{padding:16px 18px;display:flex;flex-direction:column;gap:10px}
+.row1{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline}.badge{font-size:12px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--chip);color:var(--muted)}
+.metric{display:flex;gap:18px;flex-wrap:wrap;font-size:13.5px;align-items:baseline}.metric b{font-size:20px;font-weight:600;margin-right:4px}.facts{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:14px}
+.action{background:var(--accent-soft);padding:14px 18px;display:grid;grid-template-columns:72px minmax(0,1fr);gap:6px 12px;font-size:14px}.action .k{font-size:12px;font-weight:600;color:var(--accent-ink);padding-top:2px}.action .t{font-weight:700;font-size:15px}
+.actno{display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#14213D;font-size:12px;font-weight:700;align-items:center;justify-content:center;margin-right:8px}
+.tbl{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;color:var(--muted);font-weight:600}td.r,th.r{text-align:right;white-space:nowrap}
+details{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:12px 18px}summary{cursor:pointer;font-weight:600}details .in{display:flex;flex-direction:column;gap:12px;margin-top:12px;font-size:13.5px}
+.next{border:1px dashed var(--line);border-radius:12px;padding:14px 18px;font-size:13.5px;color:var(--muted)}
+@media (max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.kpi:first-child{grid-column:1/-1}.growth{grid-template-columns:minmax(0,1fr)}h1{font-size:22px}}
+`;
 
-export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
-  const pres = new PptxGenJS();
-  pres.layout = "LAYOUT_16x9"; // 10 x 5.625 in
-  pres.author = "Wylie · growthit";
-  pres.company = "㈜와일리";
-  pres.title = `${model.meta.brandName} ${monthLabel(model.meta.yearMonth)} 성과 리포트`;
+export function buildReportHtml(input: ReportInput, model: ReportModel): string {
+  const ym = model.meta.yearMonth;
+  const prevYm = model.meta.prevYearMonth;
+  const snaps: MonthSnapshot[] = [...input.history.filter((h) => h.yearMonth < ym), currentSnapshot(input, model)].sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+  const idx = snaps.length - 1;
+  const s = snaps[idx];
+  const p = idx > 0 && snaps[idx - 1].yearMonth === prevYm ? snaps[idx - 1] : null;
+  const days = daysIn(ym);
+  const pdays = p ? daysIn(prevYm) : null;
 
-  const k = (key: string) => model.summary.kpis.find((x) => x.key === key)!;
+  const perDay = (v: number | null | undefined, d: number | null) => (v != null && d ? v / d : null);
+  const chg = (a: number | null, b: number | null) => (a != null && b != null && b !== 0 ? ((a - b) / b) * 100 : null);
+  const payDay = perDay(s.appPay, days);
+  const payDayP = perDay(p?.appPay, pdays);
+  const ordDay = perDay(s.appOrders, days);
+  const ordDayP = perDay(p?.appOrders, pdays);
+  const ticket = s.appPay != null && s.appOrders ? s.appPay / s.appOrders : null;
+  const ticketP = p?.appPay != null && p.appOrders ? p.appPay / p.appOrders : null;
+  const newDay = perDay(s.newMembers, days);
+  const newDayP = perDay(p?.newMembers, pdays);
 
-  // 1. 표지 ──────────────────────────────────────────────────────────────
-  {
-    const s = pres.addSlide();
-    s.background = { color: C.navy };
-    s.addShape(pres.ShapeType.ellipse, { x: 7.2, y: 0.9, w: 3.6, h: 3.6, fill: { color: C.mint, transparency: 78 }, line: { color: C.mint, transparency: 78 } });
-    s.addShape(pres.ShapeType.ellipse, { x: 8.2, y: 2.9, w: 2.4, h: 2.4, fill: { color: C.mint, transparency: 60 }, line: { color: C.mint, transparency: 60 } });
-    s.addText("MONTHLY PERFORMANCE REPORT", { x: 0.7, y: 1.2, w: 7, h: 0.35, fontFace: FONT, fontSize: 12, bold: true, color: C.mint, charSpacing: 3, margin: 0, isTextBox: true });
-    s.addText(`${model.meta.brandName}\n${monthLabel(model.meta.yearMonth)} 성과 리포트`, { x: 0.7, y: 1.7, w: 7.5, h: 1.6, fontFace: FONT, fontSize: 36, bold: true, color: C.white, margin: 0, valign: "top", fit: "shrink", isTextBox: true });
-    s.addText("성장을 잇다, 그로스잇", { x: 0.7, y: 3.5, w: 6, h: 0.4, fontFace: FONT, fontSize: 14, italic: true, color: "B8C4DA", margin: 0, isTextBox: true });
-    const d = new Date(model.meta.generatedAt);
-    s.addText(`${model.meta.companyName}  ·  월 1회 · 담당자 요청 시 발행  ·  발행일 ${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`, { x: 0.7, y: 4.75, w: 7, h: 0.3, fontFace: FONT, fontSize: 10, color: "B8C4DA", margin: 0, isTextBox: true });
-    s.addText("growthit, Powered by Wylie", { x: 0.7, y: 5.05, w: 6, h: 0.3, fontFace: FONT, fontSize: 10, bold: true, color: C.white, margin: 0, isTextBox: true });
+  const dEl = (v: number | null, unit: "%" | "원" | "%p") => {
+    if (v == null) return `<span class="d muted">전월 비교 없음</span>`;
+    const cls = v > 0 ? "up" : v < 0 ? "down" : "";
+    const f = unit === "%" ? pctStr(v) : unit === "%p" ? ppStr(v, 2) : `${v > 0 ? "+" : ""}${nf(v)}원`;
+    return `<span class="d ${cls} num">${v > 0 ? "▲ " : v < 0 ? "▼ " : ""}${f}</span>`;
+  };
+  const cardHtml: string[] = [];
+  const pushCard = (l: string, v: string, sub: string, d: string) => cardHtml.push(`<div class="kpi"><span class="l">${esc(l)}</span><span class="v num">${esc(v)}</span>${d}<span class="s">${esc(sub)}</span></div>`);
+  if (payDay != null) pushCard("일평균 앱 결제금액", won(payDay), `월 합계 ${won(s.appPay!)}`, dEl(chg(payDay, payDayP), "%"));
+  if (ordDay != null) pushCard("일평균 앱 주문수", `${nf(ordDay)}건`, `월 합계 ${nf(s.appOrders!)}건`, dEl(chg(ordDay, ordDayP), "%"));
+  if (ticket != null) pushCard("객단가", `${nf(ticket)}원`, ticketP != null ? `전월 ${nf(ticketP)}원` : "", dEl(ticketP != null ? ticket - ticketP : null, "원"));
+  if (newDay != null) pushCard("일평균 신규 가입회원", `${nf(newDay)}명`, `월 합계 ${nf(s.newMembers!)}명`, dEl(chg(newDay, newDayP), "%"));
+  if (s.appShare != null) pushCard("앱 비중", `${s.appShare.toFixed(2)}%`, "전체 매출 대비 그로스잇 앱", dEl(p?.appShare != null ? s.appShare - p.appShare : null, "%p"));
+
+  // 요약 문장
+  const summary =
+    payDay != null && payDayP != null
+      ? `일평균 앱 결제금액은 ${won(payDay)}으로 ${monthLabel(prevYm).replace(/^\d+년 /, "")}보다 ${Math.abs(chg(payDay, payDayP)!).toFixed(1)}% ${payDay >= payDayP ? "늘었습니다" : "줄었습니다"}. 일평균 증감 ${won(Math.abs(payDay - payDayP))}${ordDay != null && ordDayP != null ? `, 일평균 주문수는 ${Math.abs(chg(ordDay, ordDayP)!).toFixed(1)}% ${ordDay >= ordDayP ? "증가" : "감소"}했습니다` : ""}.`
+      : payDay != null
+        ? `일평균 앱 결제금액은 ${won(payDay)}입니다. 전월 데이터가 없어 비교는 생략합니다.`
+        : "수집된 데이터가 부족해 요약 문장을 만들지 못했습니다.";
+
+  // 일평균 추이 막대(최근 6개월)
+  const series = snaps
+    .map((x) => ({ m: x.yearMonth, v: perDay(x.appPay, daysIn(x.yearMonth)) }))
+    .filter((x): x is { m: string; v: number } => x.v != null)
+    .slice(-6);
+  let chart = "";
+  if (series.length > 0) {
+    const W = 420, H = 190, pad = { l: 8, r: 8, t: 26, b: 34 };
+    const mx = Math.max(...series.map((x) => x.v)) * 1.08;
+    const bw = (W - pad.l - pad.r) / series.length;
+    const y = (v: number) => pad.t + (H - pad.t - pad.b) * (1 - v / mx);
+    const bars = series
+      .map((h, k) => {
+        const x = pad.l + k * bw + bw * 0.18, w = bw * 0.64, last = k === series.length - 1;
+        return `<rect x="${x.toFixed(1)}" y="${y(h.v).toFixed(1)}" width="${w.toFixed(1)}" height="${(H - pad.b - y(h.v)).toFixed(1)}" rx="3" fill="var(--accent)" opacity="${last ? 1 : 0.4}"/><text x="${(x + w / 2).toFixed(1)}" y="${(y(h.v) - 7).toFixed(1)}" text-anchor="middle" class="${last ? "lbl" : ""}">${(h.v / 1e6).toFixed(0)}</text><text x="${(x + w / 2).toFixed(1)}" y="${H - pad.b + 16}" text-anchor="middle">${Number(h.m.slice(5))}월</text>`;
+      })
+      .join("");
+    chart = `<h3>일평균 결제금액 추이 <span class="note" style="font-weight:400">(백만원)</span></h3><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="최근 일평균 앱 결제금액"><line x1="${pad.l}" x2="${W - pad.r}" y1="${H - pad.b}" y2="${H - pad.b}" stroke="var(--line)"/>${bars}</svg>`;
   }
 
-  // 2. 핵심 요약 ─────────────────────────────────────────────────────────
-  {
-    const s = frame(pres, model, "01", "핵심 요약", `${monthLabel(model.meta.yearMonth)} 그로스잇 성과 한눈에 보기`);
-    const top = [k("appPay"), k("appShare"), k("appOrders"), k("saving")];
-    top.forEach((kk, i) => kpiCard(pres, s, 0.5 + i * 2.28, 1.25, 2.12, 1.35, kk, i === 0));
-    const sub = [k("totalPay"), k("members"), k("newMembers")];
-    sub.forEach((kk, i) => kpiCard(pres, s, 0.5 + i * 3.04, 2.78, 2.9, 1.1, kk));
-    sectionLabel(s, "이번 달 핵심 메시지", 0.5, 4.02, 4);
-    const lines = model.summary.headlines.length > 0 ? model.summary.headlines : ["수집된 데이터가 부족해 요약 문장을 만들지 못했습니다."];
-    s.addText(
-      lines.slice(0, 4).map((t, i, a) => ({ text: t, options: { bullet: true, breakLine: i < a.length - 1 } })),
-      { x: 0.5, y: 4.3, w: 9, h: 0.92, fontFace: FONT, fontSize: 10, color: C.ink, margin: 0, valign: "top", paraSpaceAfter: 2, fit: "shrink", isTextBox: true }
-    );
-  }
+  // 증가분 / 주문 유형 / 주말·평일
+  const wk = weekendRatio(model.sales.daily.map((d) => ({ date: d.date, orders: d.orders })));
+  const wkP = weekendRatio(model.sales.prevDaily.map((d) => ({ date: d.date, orders: d.orders })));
+  const typeTotal = model.sales.byOrderType.reduce((a, b) => a + b.pay, 0);
+  const growthBox = `<h3>일평균 증감 요약</h3>
+    <div class="legend" style="display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:13.5px">
+      ${payDay != null && payDayP != null ? `<div>일평균 결제금액 <b class="num">${payDay - payDayP >= 0 ? "+" : "-"}${won(Math.abs(payDay - payDayP))}</b> <span class="muted">(${pctStr(chg(payDay, payDayP)!)})</span></div>` : ""}
+      ${wk ? `<div>주말/평일 일평균 주문 비율 <b class="num">${wk.ratio.toFixed(2)}배</b> <span class="muted">${wkP ? `(전월 ${wkP.ratio.toFixed(2)}배)` : ""}</span></div>` : ""}
+      ${model.sales.byOrderType.length > 0 && typeTotal > 0 ? `<div>앱 결제 구성 ${model.sales.byOrderType.map((t) => `${esc(t.label)} ${((t.pay / typeTotal) * 100).toFixed(0)}%`).join(" · ")}</div>` : ""}
+    </div>
+    <p class="note" style="margin:10px 0 0">기존 매장/신규 매장별 기여도는 매장별 월 집계가 쌓이는 다음 단계에서 제공합니다.${model.stores.newStores ? ` 이번 달 신규 오픈은 정산 기준 ${model.stores.newStores.before15 + model.stores.newStores.after15}곳입니다.` : ""}</p>`;
 
-  // 2-1. 일평균 기준 지표 ────────────────────────────────────────────────
-  // 월 일수(28~31일)가 달라 월 합계만 비교하면 착시가 생기므로 일평균으로 다시 봅니다. 전월 일별 데이터가 있으면 같은 일자끼리 겹쳐 그립니다.
-  if (model.sales.dailyAvg) {
-    const da = model.sales.dailyAvg;
-    const s = frame(pres, model, "01+", "일평균 기준 핵심 지표", da.prevDays ? `월 일수 차이 보정 — 당월 ${da.days}일 · 전월 ${da.prevDays}일 기준 하루 평균` : "월 일수 차이를 보정한 하루 평균");
-    da.items.forEach((it, i) => {
-      const x = 0.5 + i * 2.28;
-      card(pres, s, x, 1.25, 2.12, 1.15, i === 0 ? C.navy : C.card);
-      const dark = i === 0;
-      s.addText(it.label, { x: x + 0.12, y: 1.32, w: 1.88, h: 0.36, fontFace: FONT, fontSize: 9, color: dark ? "B8C4DA" : C.gray, margin: 0, valign: "top", isTextBox: true });
-      const val = it.value == null ? "-" : it.unit === "원" ? `${fmtNum(Math.round(it.value / 10000))}만원` : `${fmtNum(it.value)}${it.unit}`;
-      s.addText(val, { x: x + 0.12, y: 1.66, w: 1.88, h: 0.42, fontFace: FONT, fontSize: 18, bold: true, color: dark ? C.white : C.navy, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-      const up = (it.pct ?? 0) > 0;
-      const dc = it.pct == null ? (dark ? "B8C4DA" : C.gray) : it.pct === 0 ? C.gray : dark ? C.mint : up ? C.good : C.bad;
-      s.addText(it.pct == null ? "전월 비교 없음" : `전월 대비 ${fmtSigned(it.pct, "%")}`, { x: x + 0.12, y: 2.08, w: 1.88, h: 0.24, fontFace: FONT, fontSize: 9, bold: true, color: dc, margin: 0, isTextBox: true });
-    });
-    sectionLabel(s, "일평균 추이 — 일자별 그로스잇 매출 (만원)", 0.5, 2.55, 6);
-    const cur = model.sales.daily;
-    const prv = model.sales.prevDaily;
-    if (cur.length > 0) {
-      const n = Math.max(da.days, da.prevDays ?? 0, cur.length);
-      const labels = Array.from({ length: n }, (_, i) => String(i + 1));
-      const byDay = (list: typeof cur) => {
-        const m = new Map(list.map((d) => [Number(d.date.slice(8)), Math.round(d.amount / 10000)]));
-        return labels.map((_, i) => m.get(i + 1) ?? null);
-      };
-      const series = [{ name: `${monthLabel(model.meta.yearMonth)}`, labels, values: byDay(cur) as unknown as number[] }];
-      if (prv.length > 0) series.push({ name: `${monthLabel(model.meta.prevYearMonth)}`, labels, values: byDay(prv) as unknown as number[] });
-      s.addChart(pres.ChartType.line, series, {
-        x: 0.4, y: 2.8, w: 9.2, h: 2.1, chartColors: [C.mint, "A5B4CC"], lineSize: 2, lineDataSymbolSize: 4, showLegend: series.length > 1, legendPos: "b", showValue: false, ...chartBase,
-      } as PptxGenJS.IChartOpts);
-    } else empty(s, 0.5, 2.9, 9, 1.9);
-    s.addText("일평균 = 월 합계 ÷ 해당 월 일수. 월 합계 비교(핵심 요약)와 달리 31일·30일 같은 일수 차이의 영향을 받지 않습니다.", { x: 0.5, y: 4.95, w: 9, h: 0.25, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, isTextBox: true });
-  }
+  // 주목할 변화
+  const insights = pickInsights(snaps, idx);
+  const insightsHtml =
+    insights.length === 0
+      ? `<div class="next">최근 몇 개월의 비교 데이터가 부족해 이번 달은 "주목할 변화"를 고르지 않았습니다. 월별 데이터가 3개월 이상 쌓이면 자동으로 표시됩니다.</div>`
+      : insights
+          .map(
+            (x, k) => `<article class="insight"><div class="top"><div class="row1"><h3><span class="actno">${k + 1}</span>${esc(x.name)}</h3><span class="badge">평소 변동폭의 ${Math.abs(x.z).toFixed(1)}배 · 근거 ${x.n}개월</span></div>
+        <div class="metric"><span><b class="num">${esc(x.cur)}</b>이번 달</span><span><b class="num" style="font-size:16px">${esc(x.base)}</b>최근 평균</span><span class="d ${x.down ? "down" : "up"} num">${esc(x.delta)}</span></div>
+        <ul class="facts">${x.facts.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></div>
+        <div class="action"><span class="k">액션</span><span class="t">${esc(x.title)}</span><span class="k">실행 방법</span><span>${esc(x.how)}</span><span class="k">측정 지표</span><span>${esc(x.kpi)}</span></div></article>`
+          )
+          .join("");
 
-  // 3. 매출·GMV (구성·추이) ────────────────────────────────────────────────
-  {
-    const sl = model.sales;
-    const s = frame(pres, model, "02", "매출 · GMV 성과", "전체 매출 중 그로스잇 앱 매출과 6개월 추이");
-    sectionLabel(s, "매출 구성 (온라인·오프라인)", 0.5, 1.2, 4.3);
-    if (sl.totalPay != null && sl.appPay != null && sl.onlinePay != null && sl.offlinePay != null) {
-      const otherOnline = Math.max(0, sl.onlinePay - sl.appPay);
-      addDoughnut(pres, s, 0.4, 1.45, 4.6, 2.3, ["그로스잇 앱", "배달앱 등 기타 온라인", "오프라인"], [sl.appPay, otherOnline, sl.offlinePay]);
-      stat(pres, s, 0.5, 3.85, 1.45, 1.2, "전체 매출액", `${fmtWonShort(sl.totalPay)}원`, `${fmtWon(sl.totalPay)}`);
-      stat(pres, s, 2.03, 3.85, 1.45, 1.2, "그로스잇 매출액", `${fmtWonShort(sl.appPay)}원`, `앱 비중 ${fmtPct(sl.appShare, 2)}`);
-      stat(pres, s, 3.56, 3.85, 1.45, 1.2, "앱 주문 수", `${fmtNum(sl.appOrders)}건`, `전체 ${fmtNum(sl.totalOrders)}건`);
-    } else empty(s, 0.5, 1.5, 4.5, 3.4, "매장별 매출통계를 수집하지 못했습니다");
-    sectionLabel(s, "그로스잇 매출액 6개월 추이 (만원)", 5.3, 1.2, 4.3);
-    const t = sl.trend.filter((x) => x.appPay != null);
-    if (t.length > 0) {
-      addBar(pres, s, 5.2, 1.45, 4.4, 2.5, t.map((x) => monthShort(x.yearMonth)), t.map((x) => Math.round((x.appPay ?? 0) / 10000)), { name: "그로스잇 매출액(만원)" });
-      const shares = sl.trend.filter((x) => x.appShare != null);
-      s.addText(shares.length > 0 ? `앱 비중: ${shares.map((x) => `${monthShort(x.yearMonth)} ${fmtPct(x.appShare, 2)}`).join("  ·  ")}` : "앱 비중 추이는 앱·전체 구분 수집이 된 달부터 표시됩니다.", {
-        x: 5.3, y: 4.05, w: 4.3, h: 0.5, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, valign: "top", isTextBox: true,
-      });
-    } else empty(s, 5.3, 1.5, 4.3, 3.4);
-  }
-
-  // 4. 매출·GMV (일별·요일·시간대) ──────────────────────────────────────────
-  {
-    const sl = model.sales;
-    const s = frame(pres, model, "02", "매출 · GMV 성과 (일별 · 요일 · 시간대)", sl.ordersSampled ? "주문이 매우 많아 시간대는 일부 주문으로 추정한 참고값입니다(요일은 일별 건수 합계)" : sl.ordersTruncated ? "주문 데이터 일부만 집계되어 요일·시간대는 참고용입니다" : "언제 가장 많이 팔렸는지");
-    sectionLabel(s, "일별 그로스잇 매출 (만원)", 0.5, 1.2, 5);
-    if (sl.daily.length > 0) {
-      s.addChart(pres.ChartType.line, [{ name: "일별 매출(만원)", labels: sl.daily.map((d) => String(Number(d.date.slice(8)))), values: sl.daily.map((d) => Math.round(d.amount / 10000)) }], {
-        x: 0.4, y: 1.45, w: 9.2, h: 1.75, chartColors: [C.mint], lineSize: 2, lineDataSymbolSize: 5, showLegend: false, showValue: false, ...chartBase,
-      } as PptxGenJS.IChartOpts);
-    } else empty(s, 0.5, 1.5, 9, 1.6);
-    sectionLabel(s, "요일별 주문 수", 0.5, 3.3, 4.2);
-    if (sl.dow.length > 0) addBar(pres, s, 0.4, 3.5, 4.5, 1.7, sl.dow.map((d) => d.label), sl.dow.map((d) => d.orders), { name: "주문 수" });
-    else empty(s, 0.5, 3.6, 4.4, 1.5);
-    sectionLabel(s, "시간대별 주문 수", 5.2, 3.3, 4.2);
-    if (sl.hours.length > 0) addBar(pres, s, 5.1, 3.5, 4.5, 1.7, sl.hours.map((_, h) => String(h)), sl.hours, { name: "주문 수", color: C.navy, showValue: false });
-    else empty(s, 5.2, 3.6, 4.4, 1.5);
-  }
-
-  // 5. 채널 효율 ─────────────────────────────────────────────────────────
-  {
-    const ch = model.channel;
-    const f = ch.fee;
-    const s = frame(pres, model, "03", "채널 효율", `그로스잇 vs 배달앱 — 같은 매출을 배달앱으로 팔았다면 (수수료 ${f.benchmarkRate}% 기준)`);
-    sectionLabel(s, "온라인 채널별 매출 (만원)", 0.5, 1.2, 4.3);
-    if (ch.channels.length > 0) {
-      const rev = [...ch.channels].slice(0, 6).reverse();
-      addBar(pres, s, 0.4, 1.45, 4.6, 3.6, rev.map((c) => c.name), rev.map((c) => Math.round(c.pay / 10000)), { name: "매출(만원)", horizontal: true, colors: rev.map((c) => (c.name === "우리가잇다" ? C.mint : "A5B4CC")) });
-    } else empty(s, 0.5, 1.5, 4.4, 3.5, "채널별 매출을 수집하지 못했습니다");
-    card(pres, s, 5.3, 1.2, 4.2, 3.85);
-    sectionLabel(s, "절감액 계산", 5.5, 1.3, 3.8);
-    const row = (label: string, value: string, y: number, bold = false, color = C.ink) => {
-      s.addText(label, { x: 5.5, y, w: 2.3, h: 0.3, fontFace: FONT, fontSize: 10, color: C.gray, margin: 0, valign: "middle", isTextBox: true });
-      s.addText(value, { x: 7.7, y, w: 1.7, h: 0.3, fontFace: FONT, fontSize: 10, bold, color, align: "right", margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-    };
-    row("그로스잇 매출액", fmtWon(model.sales.appPay), 1.7);
-    row(`배달앱 수수료 환산 (${f.benchmarkRate}%)`, fmtWon(f.benchmarkFee), 2.05);
-    row(`그로스잇 수수료`, f.missingFee ? "수수료율 미입력" : fmtWon(f.growthitFee), 2.4);
-    s.addText(`배달 ${fmtWonShort(f.deliveryPay)}원×${f.deliveryRate ?? "-"}% + 픽업 ${fmtWonShort(f.pickupPay)}원×${f.pickupRate ?? "-"}%`, { x: 5.5, y: 2.7, w: 3.9, h: 0.26, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, isTextBox: true });
-    card(pres, s, 5.5, 3.05, 3.8, 0.95, C.navy);
-    s.addText("이번 달 절감액", { x: 5.65, y: 3.1, w: 3.5, h: 0.28, fontFace: FONT, fontSize: 10, color: "B8C4DA", margin: 0, isTextBox: true });
-    s.addText(f.saving == null ? "계산 불가" : fmtWon(f.saving), { x: 5.65, y: 3.38, w: 3.5, h: 0.5, fontFace: FONT, fontSize: 22, bold: true, color: C.mint, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-    row("ROI (절감액 ÷ 수수료)", f.roi == null ? "-" : `${f.roi.toLocaleString("ko-KR")}%`, 4.1, true, C.mintDark);
-    row(ch.cumulative ? `누적 절감액 (${ch.cumulative.months}개월)` : "누적 절감액", ch.cumulative ? fmtWon(ch.cumulative.saving) : "-", 4.45, true);
-    s.addText("매장·예약 주문은 수수료 계산에서 제외했습니다.", { x: 5.5, y: 4.78, w: 3.9, h: 0.22, fontFace: FONT, fontSize: 7.5, color: C.gray, margin: 0, isTextBox: true });
-  }
-
-  // 6. 매장 운영 ─────────────────────────────────────────────────────────
-  {
-    const st = model.stores;
-    const s = frame(pres, model, "04", "매장 운영 지표", "앱 도입 현황과 매장별 그로스잇 매출");
-    stat(pres, s, 0.5, 1.2, 2.1, 1.0, "전체 매장", `${fmtNum(st.counts.total)}곳`, `정상 ${fmtNum(st.counts.normal)} · 폐업 ${fmtNum(st.counts.closed)}${st.counts.temporaryClosed ? ` · 휴점 ${fmtNum(st.counts.temporaryClosed)}` : ""}`);
-    stat(pres, s, 2.7, 1.2, 2.1, 1.0, "앱 매출 발생 매장", `${fmtNum(st.appStores)}곳`, st.adoptionRate != null ? `정상 매장 대비 ${fmtPct(st.adoptionRate)}` : undefined);
-    stat(pres, s, 4.9, 1.2, 2.1, 1.0, "앱 미도입 매장", `${fmtNum(st.notAdopted)}곳`, "미노출 · 개점 전");
-    stat(pres, s, 7.1, 1.2, 2.4, 1.0, "신규 오픈 매장", st.newStores ? `${fmtNum(st.newStores.before15 + st.newStores.after15)}곳` : "-", st.newStores ? `15일 이전 ${st.newStores.before15} · 이후 ${st.newStores.after15}` : undefined);
-    sectionLabel(s, "그로스잇 매출 TOP 8 매장", 0.5, 2.38, 5);
-    if (st.top.length > 0) {
-      table(pres, s, 0.5, 2.68, 9, [4.2, 1.9, 1.4, 1.5], ["매장", "그로스잇 매출", "앱 비중", "주문 수"], st.top.slice(0, 8).map((r) => [r.name, fmtWon(r.appPay), fmtPct(r.appShare), `${fmtNum(r.orders)}건`]), { fontSize: 9, rowH: 0.27 });
-    } else empty(s, 0.5, 2.8, 9, 2.2, "매장별 매출통계를 수집하지 못했습니다");
-  }
-
-  // 7. 멤버십·고객 (회원·등급) ─────────────────────────────────────────────
-  {
-    const mb = model.members;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (회원)", mb.levels.length > 0 ? "회원 규모와 세그먼트·등급 분포" : "회원 규모와 세그먼트 분포");
-    const totalDelta = mb.total != null && mb.totalPrev != null ? ((mb.total - mb.totalPrev) / mb.totalPrev) * 100 : null;
-    stat(pres, s, 0.5, 1.2, 2.2, 1.05, "전체 회원", `${fmtNum(mb.total)}명`, totalDelta != null ? `전월 대비 ${fmtSigned(totalDelta)}` : undefined);
-    stat(pres, s, 2.8, 1.2, 2.2, 1.05, "신규 회원", `${fmtNum(mb.newMembers)}명`);
-    stat(pres, s, 5.1, 1.2, 2.2, 1.05, "일 평균 방문", mb.visitors ? `${fmtNum(mb.visitors.avgDaily)}명` : "-", mb.visitors ? `Android ${fmtPct((mb.visitors.aos / Math.max(1, mb.visitors.total)) * 100, 0)} · iOS ${fmtPct((mb.visitors.ios / Math.max(1, mb.visitors.total)) * 100, 0)}` : undefined);
-    stat(pres, s, 7.4, 1.2, 2.1, 1.05, "구매 회원(당월)", mb.buyers?.buyers != null ? `${fmtNum(mb.buyers.buyers)}명` : "-");
-    sectionLabel(s, "회원 세그먼트", 0.5, 2.45, 4.3);
-    if (mb.segments.length > 0) addDoughnut(pres, s, 0.4, 2.7, 4.6, 2.45, mb.segments.map((x) => x.label), mb.segments.map((x) => x.count));
-    else empty(s, 0.5, 2.8, 4.4, 2.2);
-    if (mb.levels.length > 0) {
-      sectionLabel(s, "회원 등급 분포 (명)", 5.3, 2.45, 4.3);
-      addBar(pres, s, 5.2, 2.7, 4.4, 2.45, mb.levels.map((x) => x.label), mb.levels.map((x) => x.count), { name: "회원 수", color: C.navy });
-    } else {
-      // 등급제가 없는 브랜드: 빈 등급 차트 대신 세그먼트 상세표를 보여줍니다.
-      sectionLabel(s, "세그먼트별 회원 수", 5.3, 2.45, 4.3);
-      if (mb.segments.length > 0) {
-        table(pres, s, 5.3, 2.8, 4.2, [1.9, 1.3, 1.0], ["세그먼트", "회원 수", "비중"], mb.segments.map((x) => [x.label, `${fmtNum(x.count)}명`, fmtPct(x.rate)]), { fontSize: 9.5, rowH: 0.36 });
-      } else empty(s, 5.3, 2.8, 4.3, 2.2);
+  // 지난 제안 추적 — 전월 시점에 같은 방식으로 뽑았을 제안을 다시 계산해, 그 지표가 이번 달 어떻게 움직였는지 봅니다.
+  let trackingHtml = "";
+  if (idx >= 1) {
+    const prevInsights = pickInsights(snaps, idx - 1);
+    const rows = prevInsights
+      .map((pi) => {
+        const m = METRICS.find((x) => x.key === pi.key)!;
+        const e = evalMetric(m, snaps, idx);
+        if (!e) return "";
+        const fmt = (v: number) => (m.mode === "growth" ? pctStr(v) : m.key === "ticket" ? `${nf(v)}원` : `${v.toFixed(2)}%`);
+        const diff = e.cur - pi.rawCur;
+        const dTxt = m.mode === "growth" ? ppStr(diff) : m.key === "ticket" ? `${diff > 0 ? "+" : ""}${nf(diff)}원` : ppStr(diff, 2);
+        return `<tr><td>${esc(pi.title)}</td><td>${esc(pi.name)}</td><td class="r num">${esc(fmt(pi.rawCur))}</td><td class="r num">${esc(fmt(e.cur))}</td><td class="r num">${esc(dTxt)}</td></tr>`;
+      })
+      .filter(Boolean);
+    if (rows.length > 0) {
+      trackingHtml = `<section><div class="sec-head"><h2>지난 리포트 제안 지표 추적</h2></div><div class="box tbl"><table><thead><tr><th>${Number(prevYm.slice(5))}월 리포트 제안</th><th>측정 지표</th><th class="r">제안 시점</th><th class="r">이번 달</th><th class="r">변화</th></tr></thead><tbody>${rows.join("")}</tbody></table>
+      <p class="note" style="margin:10px 0 0">전월 제안은 이 리포트와 같은 방식으로 전월 시점에 다시 계산한 값입니다(발행 이력이 쌓이면 실제 발행한 제안으로 대체). 실행 여부와 관계없는 지표 변화입니다. 액션의 순수 효과를 보려면 발송 시 대상의 일부(예: 10%)를 미발송 대조군으로 남겨 비교해야 합니다.</p></div></section>`;
     }
   }
 
-  // 8. 멤버십·고객 (메뉴·성별·연령) ─────────────────────────────────────────
-  {
-    const mb = model.members;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (메뉴 · 성별 · 연령)", "무엇을, 누가 사는지");
-    sectionLabel(s, "인기 메뉴 TOP 5 (그로스잇 매출, 만원)", 0.5, 1.2, 5);
-    if (mb.topItems.length > 0) {
-      const t = mb.topItems.slice(0, 5).reverse();
-      addBar(pres, s, 0.4, 1.45, 5.2, 3.65, t.map((x) => x.name), t.map((x) => Math.round(x.appPay / 10000)), { name: "매출(만원)", horizontal: true });
-    } else empty(s, 0.5, 1.5, 5, 3.5, "메뉴별 매출을 수집하지 못했습니다");
-    sectionLabel(s, "성별 매출 비중", 5.9, 1.2, 3.6);
-    if (mb.gender.length > 0) addDoughnut(pres, s, 5.8, 1.45, 3.8, 1.75, mb.gender.map((x) => x.label), mb.gender.map((x) => x.pay));
-    else empty(s, 5.9, 1.5, 3.6, 1.6);
-    sectionLabel(s, "연령대 매출 비중 (%)", 5.9, 3.3, 3.6);
-    if (mb.ages.length > 0) addBar(pres, s, 5.8, 3.5, 3.8, 1.65, mb.ages.map((x) => x.label), mb.ages.map((x) => x.share), { name: "비중(%)", color: C.navy, format: "0.0" });
-    else empty(s, 5.9, 3.6, 3.6, 1.5);
-  }
+  // 담당자 입력(목표·액션)
+  const pl = model.plan;
+  const planHtml =
+    pl.goals.length + pl.actions.length === 0
+      ? ""
+      : `<section><div class="sec-head"><h2>담당자 입력: 익월 목표 · 액션</h2></div><div class="box tbl"><table><thead><tr><th>구분</th><th>내용</th><th>담당·기한/목표</th></tr></thead><tbody>
+      ${pl.goals.map((g) => `<tr><td>목표</td><td>${esc(g.metric)}</td><td>${esc(g.target)}</td></tr>`).join("")}
+      ${pl.actions.map((a) => `<tr><td>액션</td><td>${esc(a.title)}</td><td>${esc([a.owner, a.due].filter(Boolean).join(" · "))}</td></tr>`).join("")}
+      </tbody></table>${pl.note ? `<p class="note" style="margin:10px 0 0">${esc(pl.note)}</p>` : ""}</div></section>`;
 
-  // 9. 멤버십·고객 (구매 행동) ─────────────────────────────────────────────
-  // 회원별 구매 집계가 없으면(월 주문이 매우 많은 대형 브랜드·수집 전) 빈 안내 슬라이드를 만들지 않고 건너뜁니다
-  // (2026-10-07). 제외 사실은 마지막 "데이터 체크리스트"에 '제외'로 남습니다.
-  {
-    const b = model.members.buyers;
-    if (b) {
-      const s = frame(pres, model, "05", "멤버십 · 고객 지표 (구매 행동)", `${b.months.map(monthShort).join("·")} 구매 집계 기준${b.truncated ? " (일부만 집계)" : ""}`);
-      sectionLabel(s, "구매 빈도 (기간 합산 주문 횟수 기준)", 0.5, 1.2, 5);
-      (b.frequency ?? []).forEach((f, i) => {
-        const x = 0.5 + i * 1.9;
-        card(pres, s, x, 1.5, 1.8, 1.55, i === 2 ? C.navy : C.card);
-        s.addText(`${f.threshold}회 이상`, { x: x + 0.12, y: 1.58, w: 1.56, h: 0.28, fontFace: FONT, fontSize: 10, color: i === 2 ? "B8C4DA" : C.gray, margin: 0, isTextBox: true });
-        s.addText(`${fmtNum(f.members)}명`, { x: x + 0.12, y: 1.88, w: 1.56, h: 0.55, fontFace: FONT, fontSize: 20, bold: true, color: i === 2 ? C.white : C.navy, margin: 0, valign: "middle", fit: "shrink", isTextBox: true });
-        s.addText(`결제액 비중 ${fmtPct(f.amountShare)}`, { x: x + 0.12, y: 2.5, w: 1.56, h: 0.4, fontFace: FONT, fontSize: 9, color: i === 2 ? C.mint : C.mintDark, bold: true, margin: 0, isTextBox: true });
-      });
-      card(pres, s, 6.3, 1.5, 3.2, 1.55);
-      sectionLabel(s, "파레토 (당월 결제액 쏠림)", 6.45, 1.58, 3);
-      s.addText(b.pareto ? `상위 10% 회원이\n매출의 ${fmtPct(b.pareto.top10Share)}` : "-", { x: 6.45, y: 1.88, w: 2.9, h: 0.6, fontFace: FONT, fontSize: 13, bold: true, color: C.navy, margin: 0, valign: "top", isTextBox: true });
-      s.addText(b.pareto ? `상위 20%는 ${fmtPct(b.pareto.top20Share)}` : "", { x: 6.45, y: 2.55, w: 2.9, h: 0.3, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
-      sectionLabel(s, "재구매 · 리텐션", 0.5, 3.2, 5);
-      stat(pres, s, 0.5, 3.5, 2.9, 1.55, "전월 구매자의 재구매율", b.retention ? fmtPct(b.retention.rate) : "-", b.retention ? `전월 ${fmtNum(b.retention.prevBuyers)}명 중 ${fmtNum(b.retention.repurchased)}명이 당월 재구매` : "전월 집계가 없어 계산 불가");
-      stat(pres, s, 3.55, 3.5, 2.9, 1.55, "전월 신규 구매자의 재구매율", b.newBuyerRetention ? fmtPct(b.newBuyerRetention.rate) : "-", b.newBuyerRetention ? `전월 신규 ${fmtNum(b.newBuyerRetention.newPrev)}명 중 ${fmtNum(b.newBuyerRetention.retained)}명 재구매` : "3개월 집계가 필요합니다");
-      stat(pres, s, 6.6, 3.5, 2.9, 1.55, "당월 신규 구매자", b.newBuyers != null ? `${fmtNum(b.newBuyers)}명` : "-", b.orders != null && b.buyers ? `구매 회원 평균 ${(b.orders / Math.max(1, b.buyers)).toFixed(1)}회 · ${fmtWon(Math.round((b.amount ?? 0) / Math.max(1, b.buyers)))}` : undefined);
-    }
-  }
-
-  // 10. 쿠폰·이벤트 ───────────────────────────────────────────────────────
-  // 쿠폰·이벤트 둘 다 수집되지 않았으면 슬라이드를 만들지 않습니다.
-  if (model.members.coupons || model.members.events) {
-    const mb = model.members;
-    const s = frame(pres, model, "05", "멤버십 · 고객 지표 (쿠폰 · 이벤트)", "혜택 운영 현황");
-    // 발급은 많은데 사용 0건이면 CMS가 사용 건수를 집계하지 못한 경우가 많아 0건 대신 "-"로 표시합니다.
-    const usageMissing = !!mb.coupons && mb.coupons.issued > 0 && mb.coupons.used === 0;
-    if (mb.coupons) {
-      stat(pres, s, 0.5, 1.2, 2.1, 1.1, "쿠폰 발급", `${fmtNum(mb.coupons.issued)}건`);
-      stat(pres, s, 2.7, 1.2, 2.1, 1.1, "쿠폰 사용", usageMissing ? "-" : `${fmtNum(mb.coupons.used)}건`, usageMissing ? "CMS 사용 집계 없음" : `사용률 ${fmtPct(mb.coupons.rate)}`);
-      stat(pres, s, 4.9, 1.2, 2.1, 1.1, "쿠폰 할인액", usageMissing ? "-" : fmtWon(mb.coupons.dcAmt));
-    } else empty(s, 0.5, 1.2, 6.5, 1.1, "쿠폰 통계를 수집하지 못했습니다");
-    stat(pres, s, 7.1, 1.2, 2.4, 1.1, "진행 중 이벤트", mb.events ? `${fmtNum(mb.events.running)}개` : "-", mb.events ? `전체 ${mb.events.total}개 등록` : undefined);
-    sectionLabel(s, "쿠폰 사용 TOP 5 매장", 0.5, 2.5, 4.3);
-    if (mb.coupons && mb.coupons.topStores.length > 0) {
-      table(pres, s, 0.5, 2.8, 4.5, [2.1, 0.8, 0.8, 0.8], ["매장", "발급", "사용", "사용률"], mb.coupons.topStores.map((r) => [r.name, fmtNum(r.issued), fmtNum(r.used), fmtPct(r.rate)]), { fontSize: 8.5, rowH: 0.3 });
-    } else empty(s, 0.5, 2.9, 4.5, 2);
-    sectionLabel(s, "진행 중 이벤트", 5.3, 2.5, 4.3);
-    if (mb.events && mb.events.list.length > 0) {
-      table(pres, s, 5.3, 2.8, 4.2, [1.9, 0.7, 1.6], ["이벤트", "유형", "기간"], mb.events.list.slice(0, 6).map((e) => [e.name, e.type, e.period.replace(/-/g, ".")]), { fontSize: 8, rowH: 0.3, align: ["left", "center", "left"] });
-    } else empty(s, 5.3, 2.9, 4.2, 2, "진행 중인 이벤트가 없습니다");
-  }
-
-  // 11. 익월 목표·액션 ─────────────────────────────────────────────────────
-  {
-    const p = model.plan;
-    const s = frame(pres, model, "06", "익월 목표 및 액션 아이템", "다음 달 목표와 전월 액션 이행 점검");
-    sectionLabel(s, "익월 목표", 0.5, 1.2, 4.3);
-    if (p.goals.length > 0) table(pres, s, 0.5, 1.5, 4.4, [2.0, 2.4], ["지표", "목표"], p.goals.slice(0, 5).map((g) => [g.metric, g.target]), { fontSize: 9, rowH: 0.3, align: ["left", "left"] });
-    else empty(s, 0.5, 1.6, 4.4, 1.3, "입력된 목표가 없습니다");
-    sectionLabel(s, "익월 액션 아이템", 5.1, 1.2, 4.3);
-    if (p.actions.length > 0) table(pres, s, 5.1, 1.5, 4.4, [2.3, 1.0, 1.1], ["액션", "담당", "기한"], p.actions.slice(0, 5).map((a) => [a.title, a.owner, a.due.replace(/-/g, ".")]), { fontSize: 9, rowH: 0.3, align: ["left", "left", "left"] });
-    else empty(s, 5.1, 1.6, 4.4, 1.3, "입력된 액션이 없습니다");
-    sectionLabel(s, p.prevReview.length > 0 ? "전월 액션 이행 점검" : "제안 액션 (데이터 기반)", 0.5, 3.35, 5);
-    if (p.prevReview.length > 0) {
-      const st = { DONE: "완료", PARTIAL: "일부 진행", TODO: "미진행" } as const;
-      table(pres, s, 0.5, 3.65, 9, [4.0, 1.2, 3.8], ["액션", "상태", "코멘트"], p.prevReview.slice(0, 4).map((r) => [r.title, st[r.status], r.comment]), { fontSize: 9, rowH: 0.3, align: ["left", "center", "left"] });
-    } else if (p.suggestions.length > 0) {
-      s.addText(p.suggestions.slice(0, 4).map((t, i, a) => ({ text: t, options: { bullet: true, breakLine: i < a.length - 1 } })), { x: 0.5, y: 3.65, w: 9, h: 1.4, fontFace: FONT, fontSize: 9.5, color: C.ink, margin: 0, valign: "top", paraSpaceAfter: 3, fit: "shrink", isTextBox: true });
-    } else empty(s, 0.5, 3.7, 9, 1.3, "전월 액션 기록이 없습니다");
-    if (p.note) s.addNotes(p.note);
-  }
-
-  // 12. 데이터 체크리스트 ──────────────────────────────────────────────────
-  {
-    const s = frame(pres, model, "07", "데이터 체크리스트", "이 리포트의 수치가 어떤 데이터에 근거하는지");
-    const rows = model.checklist.map((c) => [c.skipped ? "제외" : c.ok ? "확인" : "점검 필요", c.item, c.note]);
-    table(pres, s, 0.5, 1.25, 9, [1.1, 3.1, 4.8], ["상태", "항목", "비고"], rows, { fontSize: 8.5, rowH: 0.31, align: ["center", "left", "left"], cellColor: (t, c) => (c === 0 ? (t === "확인" ? C.good : t === "제외" ? C.gray : C.warn) : undefined) });
-  }
-
-  const out = (await pres.write({ outputType: "nodebuffer" })) as unknown as Buffer;
-  return Buffer.from(out);
+  const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(model.meta.brandName)} 그로스잇 월간 리포트 ${esc(ym)}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>${CSS}</style></head><body><div class="wrap">
+<header><div class="eyebrow">GROWTHIT MONTHLY · ${esc(model.meta.brandName)}</div><h1>${esc(model.meta.brandName)} 그로스잇 월간 리포트</h1>
+<div class="note">${esc(monthLabel(ym))} · 그로스잇 앱 결제 기준 · 월 1회 · 담당자 요청 시 발행 · growthit, Powered by Wylie</div></header>
+<div class="summary">${esc(summary)}</div>
+<section><div class="sec-head"><h2>이번 달 핵심 지표</h2><span class="note">${days}일${pdays ? ` / 전월 ${pdays}일` : ""} → 금액·주문수는 일평균으로 비교</span></div>
+<div class="kpis">${cardHtml.join("")}</div>
+<div class="growth"><div class="box">${growthBox}</div><div class="box chart">${chart || '<p class="note">추이 데이터가 없습니다.</p>'}</div></div></section>
+<section><div class="sec-head"><h2>이번 달 주목할 변화와 액션 플랜</h2><span class="note">평소 변동폭 대비 가장 크게 움직인 지표 (최대 3개)</span></div><div style="display:flex;flex-direction:column;gap:14px">${insightsHtml}</div></section>
+${trackingHtml}${planHtml}
+<div class="next"><b>다음 단계 예정 항목</b> — 기존/신규 매장 증감 분해, 메뉴 변화, 구매회원·재구매율·푸드 동반구매율 등 주문 원본 기반 지표는 매장별·메뉴별 월 집계와 주문 단위 데이터가 확보되면 이 리포트에 추가됩니다.</div>
+<details><summary>지표 선정 방식 · 데이터 기준</summary><div class="in">
+<p style="margin:0">지표마다 최근 개월(최대 3개월)의 평소 값과 평소 변동폭을 구하고, 이번 달 값이 평소에서 변동폭의 몇 배 벗어났는지로 순위를 매깁니다(성장률 지표는 전월 대비 증감률을 비교). 나빠진 방향의 변화에는 가중치 1.3을 주고, 같은 영역(예: 일평균 매출·주문)에서는 1개만 고릅니다. 근거 개월 수가 2개월 미만인 지표는 제외합니다.</p>
+<p class="note" style="margin:0">데이터 기준: 그로스잇 CMS 월 집계(앱 결제금액 = "우리가잇다" 채널 실결제액, 전체 매출 = 온라인+오프라인). 일평균 = 월 합계 ÷ 해당 월 일수. 객단가 = 앱 결제금액 ÷ 앱 주문수. 신규 가입회원 = CMS 신규 회원 수(가입 기준이며, 첫 주문 기준 '신규 구매회원'과 다릅니다). 숫자는 CMS 집계 반올림 등으로 팀 내부 원본 계산과 2% 미만 오차가 있을 수 있습니다. 표의 수치는 집계값에서 계산한 값이며 원인에 대한 추정은 포함하지 않습니다.</p></div></details>
+</div></body></html>`;
+  return html;
 }
 
+// 당월 스냅샷 — buildReportModel이 쓰는 것과 같은 방식(저장 데이터 → 스냅샷)으로 만듭니다.
+function currentSnapshot(input: ReportInput, model: ReportModel): MonthSnapshot {
+  return snapshotFromData(model.meta.yearMonth, input.current);
+}
