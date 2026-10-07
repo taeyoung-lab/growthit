@@ -31,12 +31,22 @@ interface MonthlyStatus {
   exists: boolean;
   published: boolean;
   collected_at: number | null;
-  source: "MANUAL" | "BACKFILL" | null;
+  source: "MANUAL" | "BACKFILL" | "AUTO" | null;
 }
 
 function currentYearMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// 리포트는 마감된 달을 보고하므로 기본 대상은 "전월"입니다(당월은 아직 진행 중). 과거 월은 언제든 선택할 수 있습니다.
+function shiftYearMonth(ym: string, delta: number): string {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function defaultYearMonth(): string {
+  return shiftYearMonth(currentYearMonth(), -1);
 }
 
 interface HistoryItem {
@@ -90,7 +100,7 @@ function ReportsContent() {
 
   const [step, setStep] = useState<Step>("select");
   const [brandId, setBrandId] = useState("");
-  const [yearMonth, setYearMonth] = useState(currentYearMonth());
+  const [yearMonth, setYearMonth] = useState(defaultYearMonth());
   const [monthlyStatus, setMonthlyStatus] = useState<MonthlyStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
 
@@ -313,16 +323,39 @@ function ReportsContent() {
     }
   }
 
-  async function publish() {
+  async function publish(format: "pptx" | "html" = "pptx") {
     if (!selectedBrand) return;
     setPublishing(true);
     setSaveMessage(null);
     try {
       const { blob, fileName } = await authedFetchBlob(`/api/brands/${selectedBrand.id}/report/publish`, {
         method: "POST",
-        body: JSON.stringify({ year_month: yearMonth, overrides }),
+        body: JSON.stringify({ year_month: yearMonth, overrides, format }),
       });
-      const name = fileName ?? `${selectedBrand.brand_name}_${yearMonth.replace("-", "")}_성과리포트.pptx`;
+      const name = fileName ?? `${selectedBrand.brand_name}_${yearMonth.replace("-", "")}_${format === "html" ? "월간리포트.html" : "성과리포트.pptx"}`;
+      setPublished({ blob, fileName: name });
+      downloadBlob(blob, name);
+      await loadHistory(selectedBrand.id);
+      setStep("published");
+    } catch (e) {
+      setSaveMessage(e instanceof Error ? e.message : "리포트 발행에 실패했습니다.");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  // 이미 수집된 월은 검수 화면을 거치지 않고 저장된 데이터·입력값(overrides)으로 바로 발행합니다.
+  async function quickPublish(format: "pptx" | "html") {
+    if (!selectedBrand) return;
+    setPublishing(true);
+    setSaveMessage(null);
+    setInput(null); // 이전 검수 화면 데이터가 남아 다른 브랜드·월에 섞이지 않도록
+    try {
+      const { blob, fileName } = await authedFetchBlob(`/api/brands/${selectedBrand.id}/report/publish`, {
+        method: "POST",
+        body: JSON.stringify({ year_month: yearMonth, format }),
+      });
+      const name = fileName ?? `${selectedBrand.brand_name}_${yearMonth.replace("-", "")}_${format === "html" ? "월간리포트.html" : "성과리포트.pptx"}`;
       setPublished({ blob, fileName: name });
       downloadBlob(blob, name);
       await loadHistory(selectedBrand.id);
@@ -337,7 +370,7 @@ function ReportsContent() {
   function resetAll() {
     setStep("select");
     setBrandId("");
-    setYearMonth(currentYearMonth());
+    setYearMonth(defaultYearMonth());
     setMonthlyStatus(null);
     setCollectNotice(null);
     setErrorMessage(null);
@@ -382,21 +415,43 @@ function ReportsContent() {
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-gray-600">대상 연·월</label>
-              <input className="input w-full" type="month" value={yearMonth} onChange={(e) => setYearMonth(e.target.value)} />
+              <input className="input w-full" type="month" max={currentYearMonth()} value={yearMonth} onChange={(e) => setYearMonth(e.target.value)} />
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {Array.from({ length: 12 }, (_, i) => shiftYearMonth(currentYearMonth(), -(i + 1))).map((ym, i) => (
+                  <button
+                    key={ym}
+                    type="button"
+                    onClick={() => setYearMonth(ym)}
+                    className={`rounded-full border px-2.5 py-1 text-xs ${ym === yearMonth ? "border-navy bg-navy text-white" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    {i === 0 ? "전월 " : ""}{ym.slice(2).replace("-", ".")}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-xs text-gray-400">리포트는 월 1회, 담당자가 요청할 때 발행합니다. 지난달은 언제든 선택할 수 있습니다.</p>
             </div>
             {statusLoading && <p className="text-xs text-gray-400">발행 이력 확인 중...</p>}
             {!statusLoading && monthlyStatus?.exists && (
               <p className="rounded-md bg-amber-50 p-3 text-xs text-amber-800">
                 이 브랜드·월은 이미 {monthlyStatus.published ? "발행" : "수집"}된 데이터가 있습니다
-                {monthlyStatus.source === "BACKFILL" && " (백필로 수집됨)"}. 다시 수집하면 최신 데이터로 덮어쓰고(입력한 수수료·목표는 유지),
+                {monthlyStatus.source === "BACKFILL" && " (백필로 수집됨)"}{monthlyStatus.source === "AUTO" && " (자동 수집됨)"}. 다시 수집하면 최신 데이터로 덮어쓰고(입력한 수수료·목표는 유지),
                 수집 없이 바로 검수하려면 아래 버튼을 누르세요.
               </p>
             )}
-            <div className="flex justify-end gap-2">
+            {saveMessage && step === "select" && <p className="text-sm text-red-600">{saveMessage}</p>}
+            <div className="flex flex-wrap justify-end gap-2">
               {monthlyStatus?.exists && (
-                <button className="btn btn-secondary" disabled={reviewLoading} onClick={openReview}>
-                  {reviewLoading ? "불러오는 중..." : "수집 없이 검수하기"}
-                </button>
+                <>
+                  <button className="btn btn-secondary" disabled={reviewLoading || publishing} onClick={openReview}>
+                    {reviewLoading ? "불러오는 중..." : "수집 없이 검수하기"}
+                  </button>
+                  <button className="btn btn-secondary" disabled={reviewLoading || publishing} onClick={() => quickPublish("html")}>
+                    {publishing ? "생성 중..." : "웹 리포트 바로 발행"}
+                  </button>
+                  <button className="btn btn-secondary" disabled={reviewLoading || publishing} onClick={() => quickPublish("pptx")}>
+                    {publishing ? "생성 중..." : "PPT 바로 발행"}
+                  </button>
+                </>
               )}
               <button className="btn btn-primary" disabled={!brandId || !yearMonth} onClick={goToCredentials}>
                 다음
@@ -654,9 +709,14 @@ function ReportsContent() {
               <button className="btn btn-secondary" onClick={saveDraft} disabled={publishing}>
                 입력값 임시 저장
               </button>
-              <button className="btn btn-primary" onClick={publish} disabled={publishing}>
-                {publishing ? "PPT 생성 중..." : "리포트 발행 (PPT 다운로드)"}
-              </button>
+              <div className="flex gap-2">
+                <button className="btn btn-secondary" onClick={() => publish("html")} disabled={publishing}>
+                  {publishing ? "생성 중..." : "웹 리포트 발행 (HTML)"}
+                </button>
+                <button className="btn btn-primary" onClick={() => publish("pptx")} disabled={publishing}>
+                  {publishing ? "생성 중..." : "리포트 발행 (PPT 다운로드)"}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -665,16 +725,22 @@ function ReportsContent() {
           <div className="flex flex-col gap-4">
             <div className="card flex flex-col gap-3 p-6">
               <p className="rounded-md bg-emerald-50 p-3 text-sm text-emerald-800">
-                {selectedBrand.brand_name} {monthLabel(yearMonth)} 리포트를 발행했습니다. PPT가 자동으로 다운로드됩니다.
+                {selectedBrand.brand_name} {monthLabel(yearMonth)} 리포트를 발행했습니다. 파일이 자동으로 다운로드됩니다.
               </p>
               <p className="text-xs text-gray-500">{published.fileName}</p>
               <div className="flex flex-wrap gap-2">
                 <button className="btn btn-secondary" onClick={() => downloadBlob(published.blob, published.fileName)}>
                   다시 다운로드
                 </button>
-                <button className="btn btn-secondary" onClick={() => setStep("review")}>
-                  검수 화면으로 돌아가기
-                </button>
+                {input ? (
+                  <button className="btn btn-secondary" onClick={() => setStep("review")}>
+                    검수 화면으로 돌아가기
+                  </button>
+                ) : (
+                  <button className="btn btn-secondary" onClick={() => setStep("select")}>
+                    같은 브랜드·월로 다른 형태 발행
+                  </button>
+                )}
                 <button className="btn btn-primary" onClick={resetAll}>
                   다른 브랜드/월 발행
                 </button>
