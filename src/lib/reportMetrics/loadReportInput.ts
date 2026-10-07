@@ -8,6 +8,7 @@ import { computeMemberMetrics, type MonthMembers } from "./memberMetrics";
 import { snapshotFromData } from "./snapshot";
 import type { ActionItem, ReportInput, ReportOverrides } from "./types";
 import { monthsBefore } from "./util";
+import { loadBreakdown } from "@/lib/cmsAutomation/breakdownStore";
 
 export class ReportDataMissingError extends Error {}
 
@@ -60,6 +61,16 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
       ? computeMemberMetrics(memberMonths)
       : null;
 
+  // 매장·메뉴 전체 목록(압축본) — 당월·전월·전전월. 없는 달은 null(해당 분석만 생략).
+  const [bdCur, bdPrev, bdPrev2] = await Promise.all(
+    [yearMonth, monthsBefore(yearMonth, 1), monthsBefore(yearMonth, 2)].map((ym) =>
+      loadBreakdown(db, brandId, ym).catch((e) => {
+        console.warn(`[loadReportInput] ${ym} 매장·메뉴 목록 읽기 실패:`, e instanceof Error ? e.message : e);
+        return null;
+      })
+    )
+  );
+
   return {
     brandName: brand.brand_name,
     companyName: brand.company_name,
@@ -71,6 +82,7 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
     overrides: (cur.overrides ?? {}) as ReportOverrides,
     prevActions,
     prevDaily,
+    breakdowns: { cur: bdCur, prev: bdPrev, prev2: bdPrev2 },
     generatedAt: Date.now(),
   };
 }
