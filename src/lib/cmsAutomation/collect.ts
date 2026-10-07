@@ -403,6 +403,7 @@ export async function collectMonthlyData(
     memberStats,
     extras: extrasValue ? extrasValue.extras : null,
     memberOrderAgg: extrasValue ? extrasValue.memberOrderAgg : null,
+    breakdown: extrasValue ? extrasValue.breakdown : null,
     collectedAt: Date.now(),
   };
 }
