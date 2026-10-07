@@ -5,6 +5,7 @@ import { loginToCms } from "./login";
 import { collectMonthlyData, CMS_FETCH_TIMEOUT_MS } from "./collect";
 import { CmsAutomationError } from "./types";
 import { saveMemberAggregates, fitMonthlyDataSize } from "./memberAggStore";
+import { saveBreakdown } from "./breakdownStore";
 import type { BrandCredentials, BrandMonthlyData, ReportBrand } from "@/lib/types";
 
 // 2026-10-02: 로그인 세션 재사용 — "백필 이어하기"를 누를 때마다 매번 새 서버 실행(invocation)이
@@ -197,6 +198,12 @@ export async function runBackfillBatch(brandId: string): Promise<BackfillBatchRe
           agg: collected.memberOrderAgg,
         }).catch((err) => console.warn(`[backfill] ${brandId} ${yearMonth} 회원 집계 저장 실패`, err));
       }
+      if (collected.breakdown) {
+        // eslint-disable-next-line no-await-in-loop
+        await saveBreakdown(db, { brandId, organizationId: brand.organization_id, yearMonth, breakdown: collected.breakdown }).catch((err) =>
+          console.warn(`[backfill] ${brandId} ${yearMonth} 매장·메뉴 목록 저장 실패`, err)
+        );
+      }
       // eslint-disable-next-line no-await-in-loop
       await brandRef.update({ backfill_completed_through: yearMonth, updated_at: Date.now() });
       processed.push(yearMonth);
@@ -365,6 +372,11 @@ export async function retrySkippedMonth(brandId: string, uid: string, requestedM
       yearMonth,
       agg: collected.memberOrderAgg,
     }).catch((err) => console.warn(`[retrySkipped] ${brandId} ${yearMonth} 회원 집계 저장 실패`, err));
+  }
+  if (collected.breakdown) {
+    await saveBreakdown(db, { brandId, organizationId: brand.organization_id, yearMonth, breakdown: collected.breakdown }).catch((err) =>
+      console.warn(`[retrySkipped] ${brandId} ${yearMonth} 매장·메뉴 목록 저장 실패`, err)
+    );
   }
   await brandRef.update({ backfill_skipped_months: FieldValue.arrayRemove(yearMonth), updated_at: Date.now() });
 
