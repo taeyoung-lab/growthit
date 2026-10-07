@@ -1,10 +1,9 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
-import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
+import { ApiAuthError } from "@/lib/adminAuthCheck";
+import { requireBrandAccess } from "@/lib/brandAccess";
 import { loadReportInput, ReportDataMissingError } from "@/lib/reportMetrics/loadReportInput";
 import { sanitizeOverrides } from "@/lib/reportMetrics/overrides";
-import type { ReportBrand } from "@/lib/types";
 
 // 화면④ — 검수·수정용 리포트 입력 조회(GET)와 담당자 입력(수수료·목표·액션) 저장(PUT).
 // 지표 계산은 클라이언트가 buildReportModel로 즉시 다시 하므로, 서버는 저장된 원본+입력만 내려줍니다.
@@ -15,22 +14,13 @@ function isYm(v: unknown): v is string {
   return typeof v === "string" && /^\d{4}-\d{2}$/.test(v);
 }
 
-async function loadBrand(id: string, orgId: string) {
-  const snap = await getAdminDb().collection("brands").doc(id).get();
-  if (!snap.exists) return { error: NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 }) };
-  const brand = { ...(snap.data() as ReportBrand), id: snap.id };
-  if (brand.organization_id !== orgId) return { error: NextResponse.json({ error: "이 브랜드에 접근할 권한이 없습니다." }, { status: 403 }) };
-  return { brand };
-}
-
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { profile } = await requireUser(req);
+    // 2026-10-06: 슈퍼 관리자 또는 이 브랜드의 담당자만 — brandAccess.ts 참고.
+    const { brand } = await requireBrandAccess(req, params.id);
     const ym = req.nextUrl.searchParams.get("year_month");
     if (!isYm(ym)) return NextResponse.json({ error: "year_month는 YYYY-MM 형식이어야 합니다." }, { status: 400 });
-    const r = await loadBrand(params.id, profile.organization_id);
-    if (r.error) return r.error;
-    const input = await loadReportInput(getAdminDb(), r.brand, ym);
+    const input = await loadReportInput(getAdminDb(), brand, ym);
     return NextResponse.json({ input });
   } catch (e) {
     if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
@@ -42,11 +32,9 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
 export async function PUT(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { profile } = await requireUser(req);
+    await requireBrandAccess(req, params.id);
     const body = await req.json().catch(() => ({}));
     if (!isYm(body.year_month)) return NextResponse.json({ error: "year_month는 YYYY-MM 형식이어야 합니다." }, { status: 400 });
-    const r = await loadBrand(params.id, profile.organization_id);
-    if (r.error) return r.error;
     let overrides;
     try {
       overrides = sanitizeOverrides(body.overrides);
