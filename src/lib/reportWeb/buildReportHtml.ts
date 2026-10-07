@@ -256,13 +256,30 @@ export function buildReportHtml(input: ReportInput, model: ReportModel): string 
   const wk = weekendRatio(model.sales.daily.map((d) => ({ date: d.date, orders: d.orders })));
   const wkP = weekendRatio(model.sales.prevDaily.map((d) => ({ date: d.date, orders: d.orders })));
   const typeTotal = model.sales.byOrderType.reduce((a, b) => a + b.pay, 0);
-  const growthBox = `<h3>일평균 증감 요약</h3>
+  const g = model.growth;
+  const manS = (n: number) => `${n >= 0 ? "+" : "-"}${nf(Math.abs(n) / 1e4)}만원`;
+  let growthBox: string;
+  if (g) {
+    const posSame = Math.max(g.sameDelta, 0);
+    const posOther = Math.max(g.otherDelta, 0);
+    const sp = posSame + posOther > 0 ? (posSame / (posSame + posOther)) * 100 : 50;
+    growthBox = `<h3>매출 증가는 어디서 왔나</h3>
+    <div class="split" aria-hidden="true"><span style="width:${sp.toFixed(1)}%"></span><span style="width:${(100 - sp).toFixed(1)}%"></span></div>
+    <div class="legend">
+      <div><i style="background:var(--accent)"></i>기존 매장 ${nf(g.sameStores)}곳 <b class="num">${manS(g.sameDelta)}</b> <span class="muted">${g.sameChgPct != null ? `(매장 매출 ${pctStr(g.sameChgPct)})` : ""}</span></div>
+      <div><i style="background:var(--muted);opacity:.45"></i>신규 오픈 ${nf(g.newStores)}곳 포함 기타 매장 <b class="num">${manS(g.otherDelta)}</b></div>
+      ${wk ? `<div class="muted">주말/평일 일평균 주문 비율 <b class="num">${wk.ratio.toFixed(2)}배</b>${wkP ? ` (전월 ${wkP.ratio.toFixed(2)}배)` : ""}</div>` : ""}
+    </div>
+    <p class="note" style="margin:10px 0 0">일평균 앱 결제금액 증감 ${manS(g.totalDelta)} 기준. 기존 매장 = ${g.basis === "2개월 연속" ? "직전 2개월 연속 앱 결제가 있던 매장" : "직전 1개월 앱 결제가 있던 매장(전전월 데이터 없음)"}. 기존 매장 중 일평균 20% 이상 줄어든 매장 ${nf(g.decliners.count)}곳${g.decliners.ratePct != null ? ` (${g.decliners.ratePct.toFixed(1)}%)` : ""}.${g.topGainers.length > 0 ? ` 증가액 상위: ${g.topGainers.map((t) => `${esc(t.name)} ${manS(t.delta)}`).join(", ")}.` : ""}</p>`;
+  } else {
+    growthBox = `<h3>일평균 증감 요약</h3>
     <div class="legend" style="display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:13.5px">
       ${payDay != null && payDayP != null ? `<div>일평균 결제금액 <b class="num">${payDay - payDayP >= 0 ? "+" : "-"}${won(Math.abs(payDay - payDayP))}</b> <span class="muted">(${pctStr(chg(payDay, payDayP)!)})</span></div>` : ""}
       ${wk ? `<div>주말/평일 일평균 주문 비율 <b class="num">${wk.ratio.toFixed(2)}배</b> <span class="muted">${wkP ? `(전월 ${wkP.ratio.toFixed(2)}배)` : ""}</span></div>` : ""}
       ${model.sales.byOrderType.length > 0 && typeTotal > 0 ? `<div>앱 결제 구성 ${model.sales.byOrderType.map((t) => `${esc(t.label)} ${((t.pay / typeTotal) * 100).toFixed(0)}%`).join(" · ")}</div>` : ""}
     </div>
-    <p class="note" style="margin:10px 0 0">기존 매장/신규 매장별 기여도는 매장별 월 집계가 쌓이는 다음 단계에서 제공합니다.${model.stores.newStores ? ` 이번 달 신규 오픈은 정산 기준 ${model.stores.newStores.before15 + model.stores.newStores.after15}곳입니다.` : ""}</p>`;
+    <p class="note" style="margin:10px 0 0">기존 매장/신규 매장별 기여도는 전월 매장별 데이터가 있어야 계산됩니다(전월 데이터를 다시 수집하면 표시됩니다).</p>`;
+  }
 
   // 주목할 변화
   const insights = pickInsights(snaps, idx);
@@ -277,6 +294,20 @@ export function buildReportHtml(input: ReportInput, model: ReportModel): string 
         <div class="action"><span class="k">액션</span><span class="t">${esc(x.title)}</span><span class="k">실행 방법</span><span>${esc(x.how)}</span><span class="k">측정 지표</span><span>${esc(x.kpi)}</span></div></article>`
           )
           .join("");
+
+  // 메뉴 변화 — 일평균 판매수량(수량 필드가 없으면 앱결제액) 기준, 표기만 다른 같은 메뉴는 합산
+  const mc = model.menuChange;
+  const menuUnit = mc?.basis === "수량" ? "개/일" : "원/일";
+  const menuList = (rows: { name: string; txt: string }[], cls: string, empty: string) =>
+    rows.length === 0 ? `<li class="muted">${empty}</li>` : rows.map((r) => `<li style="display:flex;justify-content:space-between;gap:8px"><span>${esc(r.name)}</span><span class="d ${cls} num">${esc(r.txt)}</span></li>`).join("");
+  const menuHtml = mc
+    ? `<section><div class="sec-head"><h2>메뉴 변화</h2><span class="note">일평균 ${mc.basis === "수량" ? "판매수량" : "앱결제액"} 기준 · 월 ${mc.basis === "수량" ? `${nf(mc.threshold)}개` : `${nf(mc.threshold / 1e4)}만원`} 이상 판매 메뉴</span></div>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px">
+      <div class="box"><h3 style="font-size:14px;margin-bottom:8px">많이 늘어난 메뉴</h3><ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13.5px">${menuList(mc.up.map((r) => ({ name: r.name, txt: pctStr(r.chg, 0) })), "up", "해당 없음")}</ul></div>
+      <div class="box"><h3 style="font-size:14px;margin-bottom:8px">많이 줄어든 메뉴</h3><ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13.5px">${menuList(mc.down.map((r) => ({ name: r.name, txt: pctStr(r.chg, 0) })), "down", "해당 없음")}</ul></div>
+      <div class="box"><h3 style="font-size:14px;margin-bottom:8px">이번 달 새로 판매된 메뉴</h3><ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13.5px">${menuList(mc.added.map((r) => ({ name: r.name, txt: `${nf(r.cur)}${mc.basis === "수량" ? "개" : "원"}` })), "up", "해당 없음")}</ul></div>
+    </div><p class="note" style="margin:0">단위: ${menuUnit}. 같은 메뉴가 표기만 달라 따로 등록된 경우(띄어쓰기·괄호)는 합산했습니다. 이름 철자가 다르게 새로 등록된 메뉴는 별개 메뉴로 보일 수 있습니다.</p></section>`
+    : "";
 
   // 지난 제안 추적 — 전월 시점에 같은 방식으로 뽑았을 제안을 다시 계산해, 그 지표가 이번 달 어떻게 움직였는지 봅니다.
   let trackingHtml = "";
@@ -320,8 +351,8 @@ export function buildReportHtml(input: ReportInput, model: ReportModel): string 
 <div class="kpis">${cardHtml.join("")}</div>
 <div class="growth"><div class="box">${growthBox}</div><div class="box chart">${chart || '<p class="note">추이 데이터가 없습니다.</p>'}</div></div></section>
 <section><div class="sec-head"><h2>이번 달 주목할 변화와 액션 플랜</h2><span class="note">평소 변동폭 대비 가장 크게 움직인 지표 (최대 3개)</span></div><div style="display:flex;flex-direction:column;gap:14px">${insightsHtml}</div></section>
-${trackingHtml}${planHtml}
-<div class="next"><b>다음 단계 예정 항목</b> — 기존/신규 매장 증감 분해, 메뉴 변화, 구매회원·재구매율·푸드 동반구매율 등 주문 원본 기반 지표는 매장별·메뉴별 월 집계와 주문 단위 데이터가 확보되면 이 리포트에 추가됩니다.</div>
+${menuHtml}${trackingHtml}${planHtml}
+<div class="next"><b>다음 단계 예정 항목</b> — 구매회원·재구매율·푸드 동반구매율 등 주문 원본 기반 지표는 주문 단위 데이터가 확보되면 이 리포트에 추가됩니다.</div>
 <details><summary>지표 선정 방식 · 데이터 기준</summary><div class="in">
 <p style="margin:0">지표마다 최근 개월(최대 3개월)의 평소 값과 평소 변동폭을 구하고, 이번 달 값이 평소에서 변동폭의 몇 배 벗어났는지로 순위를 매깁니다(성장률 지표는 전월 대비 증감률을 비교). 나빠진 방향의 변화에는 가중치 1.3을 주고, 같은 영역(예: 일평균 매출·주문)에서는 1개만 고릅니다. 근거 개월 수가 2개월 미만인 지표는 제외합니다.</p>
 <p class="note" style="margin:0">데이터 기준: 그로스잇 CMS 월 집계(앱 결제금액 = "우리가잇다" 채널 실결제액, 전체 매출 = 온라인+오프라인). 일평균 = 월 합계 ÷ 해당 월 일수. 객단가 = 앱 결제금액 ÷ 앱 주문수. 신규 가입회원 = CMS 신규 회원 수(가입 기준이며, 첫 주문 기준 '신규 구매회원'과 다릅니다). 숫자는 CMS 집계 반올림 등으로 팀 내부 원본 계산과 2% 미만 오차가 있을 수 있습니다. 표의 수치는 집계값에서 계산한 값이며 원인에 대한 추정은 포함하지 않습니다.</p></div></details>
