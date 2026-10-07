@@ -75,6 +75,7 @@ export interface ReportInput {
   members: MemberMetrics | null;
   overrides: ReportOverrides;
   prevActions: ActionItem[]; // 전월 리포트에 담당자가 적었던 "익월 액션" — 이번 달 이행 점검용
+  prevDaily?: { date: string; amount: number; orders: number }[]; // 전월 일별 앱 매출(일평균·일별 추이 비교용, 없으면 생략)
   generatedAt: number;
 }
 
@@ -104,6 +105,9 @@ export interface ReportModel {
     byOrderType: { label: string; pay: number; orders: number }[]; // 앱 주문 유형별
     trend: { yearMonth: string; appPay: number | null; appShare: number | null; totalPay: number | null }[];
     daily: { date: string; amount: number; orders: number }[];
+    prevDaily: { date: string; amount: number; orders: number }[];
+    // 일평균 기준 지표 — 월 일수(28~31일)가 달라 월 합계만 비교하면 생기는 착시를 줄입니다.
+    dailyAvg: { days: number; prevDays: number | null; items: { key: string; label: string; unit: "원" | "건" | "명"; value: number | null; prev: number | null; pct: number | null }[] } | null;
     dow: { label: string; orders: number; amount: number }[];
     hours: number[];
     ordersTruncated: boolean;
@@ -156,5 +160,6 @@ export interface ReportModel {
     suggestions: string[];
     note: string;
   };
-  checklist: { item: string; ok: boolean; note: string }[];
+  // skipped=true: 데이터 한계로 일부러 리포트에서 제외한 항목(점검 필요가 아니라 "제외"로 표시)
+  checklist: { item: string; ok: boolean; note: string; skipped?: boolean }[];
 }
