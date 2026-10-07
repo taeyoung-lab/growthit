@@ -188,6 +188,15 @@ function BrandsContent() {
                   담당자: {b.manager_name}
                   {b.service_open_date && ` · 서비스 오픈일: ${b.service_open_date}`}
                 </div>
+                {b.auto_collect && (
+                  // 자동 월간 수집(매월 초 전월 데이터 자동 수집)의 가장 최근 결과
+                  <p className={`mt-1 text-xs ${b.auto_collect.status === "SUCCESS" ? "text-emerald-700" : "text-red-600"}`}>
+                    자동 수집 {b.auto_collect.year_month}:{" "}
+                    {b.auto_collect.status === "SUCCESS"
+                      ? `성공 (${new Date(b.auto_collect.at).toLocaleDateString("ko-KR")})`
+                      : `실패 ${b.auto_collect.attempts}회${b.auto_collect.attempts < 3 ? " — 다음 실행에서 재시도" : " — 재시도 한도 초과, 수동 수집 필요"}${b.auto_collect.error ? ` (${b.auto_collect.error})` : ""}`}
+                  </p>
+                )}
                 {b.backfill_skipped_months && b.backfill_skipped_months.length > 0 && (
                   // CMS 서버 자체의 게이트웨이 타임아웃(504)으로 재시도해도 해결되지 않아 건너뛴 달 —
                   // backfill.ts의 GATEWAY_TIMEOUT 처리 참고. 데이터가 비어 있는 달이니 담당자가
