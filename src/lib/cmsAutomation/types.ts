@@ -3,7 +3,7 @@
 // 작성했습니다(src/lib/cmsAutomation/login.ts, collect.ts 상단 주석 참고). 다른 7개 브랜드는 같은
 // 코드베이스 기반 멀티테넌트 CMS로 추정되지만, 실제 연동 전 브랜드별로 한 번씩 구조 확인이 필요합니다.
 
-import type { CmsExtras, MemberOrderAgg } from "./collectExtras";
+import type { CmsExtras, MemberOrderAgg, MonthBreakdown } from "./collectExtras";
 
 export interface CmsLoginConfig {
   cmsUrl: string; // 예: https://cheongjadb-cms.growthit.co.kr/
@@ -39,6 +39,8 @@ export interface CmsCollectionResult {
   // 회원별 월간 구매 집계(고객번호·주문수·결제액) — 용량이 커서 brandMonthlyData가 아니라 별도 컬렉션
   // (memberAggStore.ts)에 저장합니다.
   memberOrderAgg: MemberOrderAgg | null;
+  // 월별 매장·메뉴 전체 목록(압축본) — 기존/신규 매장 분해·메뉴 변화용. 별도 컬렉션(breakdownStore.ts)에 저장합니다.
+  breakdown: MonthBreakdown | null;
   collectedAt: number;
 }
 
