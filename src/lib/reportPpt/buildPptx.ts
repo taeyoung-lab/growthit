@@ -204,6 +204,42 @@ export async function buildReportPptx(model: ReportModel): Promise<Buffer> {
     s.addText("일평균 = 월 합계 ÷ 해당 월 일수. 월 합계 비교(핵심 요약)와 달리 31일·30일 같은 일수 차이의 영향을 받지 않습니다.", { x: 0.5, y: 4.95, w: 9, h: 0.25, fontFace: FONT, fontSize: 8, color: C.gray, margin: 0, isTextBox: true });
   }
 
+  // 매출 증가는 어디서 왔나(기존/신규 매장 분해) + 메뉴 변화 — 월별 매장·메뉴 전체 목록이 수집된 브랜드만.
+  if (model.growth || model.menuChange) {
+    const g = model.growth;
+    const mc = model.menuChange;
+    const s = frame(pres, model, "01+", "매출 증가는 어디서 왔나 · 메뉴 변화", g ? `일평균 앱결제액 기준 — 기존 매장은 ${g.basis} 앱 주문이 있던 매장` : "월별 매장 데이터가 없어 메뉴 변화만 표시합니다");
+    const man = (v: number) => `${v >= 0 ? "+" : "-"}${fmtNum(Math.round(Math.abs(v) / 10000))}만원`;
+    sectionLabel(s, "기존 매장 vs 신규 오픈 (일평균 증감)", 0.5, 1.2, 4.4);
+    if (g) {
+      card(pres, s, 0.5, 1.5, 2.1, 1.1, C.navy);
+      s.addText("일평균 증감 합계", { x: 0.62, y: 1.56, w: 1.9, h: 0.25, fontFace: FONT, fontSize: 9, color: "B8C4DA", margin: 0, isTextBox: true });
+      s.addText(man(g.totalDelta), { x: 0.62, y: 1.84, w: 1.9, h: 0.5, fontFace: FONT, fontSize: 20, bold: true, color: C.white, margin: 0, fit: "shrink", isTextBox: true });
+      card(pres, s, 2.75, 1.5, 2.1, 1.1);
+      s.addText(`기존 매장 ${fmtNum(g.sameStores)}곳`, { x: 2.87, y: 1.56, w: 1.9, h: 0.25, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
+      s.addText(man(g.sameDelta), { x: 2.87, y: 1.84, w: 1.9, h: 0.4, fontFace: FONT, fontSize: 18, bold: true, color: g.sameDelta >= 0 ? C.good : C.bad, margin: 0, fit: "shrink", isTextBox: true });
+      s.addText(g.sameChgPct == null ? "" : `매장 매출 ${fmtSigned(g.sameChgPct, "%")}`, { x: 2.87, y: 2.26, w: 1.9, h: 0.24, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
+      card(pres, s, 0.5, 2.7, 2.1, 1.0);
+      s.addText(`신규 오픈 ${fmtNum(g.newStores)}곳 포함 기타`, { x: 0.62, y: 2.76, w: 1.9, h: 0.25, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
+      s.addText(man(g.otherDelta), { x: 0.62, y: 3.05, w: 1.9, h: 0.4, fontFace: FONT, fontSize: 18, bold: true, color: g.otherDelta >= 0 ? C.good : C.bad, margin: 0, fit: "shrink", isTextBox: true });
+      card(pres, s, 2.75, 2.7, 2.1, 1.0);
+      s.addText("일평균 20%↓ 매장", { x: 2.87, y: 2.76, w: 1.9, h: 0.25, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, isTextBox: true });
+      s.addText(`${fmtNum(g.decliners.count)}곳${g.decliners.ratePct == null ? "" : ` (${g.decliners.ratePct}%)`}`, { x: 2.87, y: 3.05, w: 1.9, h: 0.4, fontFace: FONT, fontSize: 18, bold: true, color: C.navy, margin: 0, fit: "shrink", isTextBox: true });
+      if (g.topGainers.length > 0) {
+        s.addText(`증가액 상위: ${g.topGainers.map((t) => `${t.name} ${man(t.delta)}`).join(" · ")}`, { x: 0.5, y: 3.85, w: 4.4, h: 0.8, fontFace: FONT, fontSize: 9, color: C.gray, margin: 0, valign: "top", isTextBox: true });
+      }
+    } else empty(s, 0.5, 1.5, 4.4, 2.5, "월별 매장 데이터가 부족합니다");
+    sectionLabel(s, `메뉴 변화 (일평균 ${mc ? mc.basis : ""} 기준 · 월 ${mc ? (mc.basis === "수량" ? `${fmtNum(mc.threshold)}개` : "500만원") : ""} 이상)`, 5.2, 1.2, 4.4);
+    if (mc) {
+      const rows: string[][] = [];
+      mc.up.forEach((m) => rows.push(["늘어남", m.name, `${fmtNum(m.prev)}→${fmtNum(m.cur)}`, fmtSigned(Math.round(m.chg * 10) / 10, "%")]));
+      mc.down.forEach((m) => rows.push(["줄어듦", m.name, `${fmtNum(m.prev)}→${fmtNum(m.cur)}`, fmtSigned(Math.round(m.chg * 10) / 10, "%")]));
+      mc.added.forEach((m) => rows.push(["신규", m.name, "-", fmtNum(m.cur)]));
+      if (rows.length > 0) table(pres, s, 5.2, 1.5, 4.4, [0.7, 2.0, 1.0, 0.7], ["구분", "메뉴", "일평균", "증감"], rows, { fontSize: 8, rowH: 0.3, align: ["left", "left", "right", "right"], cellColor: (t, c) => (c === 0 ? (t === "줄어듦" ? C.bad : t === "늘어남" ? C.good : C.navy) : undefined) });
+      else empty(s, 5.2, 1.5, 4.4, 2.5, "기준을 넘는 메뉴 변화가 없습니다");
+    } else empty(s, 5.2, 1.5, 4.4, 2.5, "월별 메뉴 데이터가 없습니다");
+  }
+
   // 3. 매출·GMV (구성·추이) ────────────────────────────────────────────────
   {
     const sl = model.sales;
