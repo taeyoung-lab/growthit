@@ -1,12 +1,11 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
-import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
+import { ApiAuthError } from "@/lib/adminAuthCheck";
+import { requireBrandAccess } from "@/lib/brandAccess";
 import { buildReportModel } from "@/lib/reportMetrics/buildReportModel";
 import { loadReportInput, ReportDataMissingError } from "@/lib/reportMetrics/loadReportInput";
 import { sanitizeOverrides } from "@/lib/reportMetrics/overrides";
 import { buildReportPptx } from "@/lib/reportPpt/buildPptx";
-import type { ReportBrand } from "@/lib/types";
 
 // 화면⑤ — "리포트 발행": 담당자 입력을 저장하고, 저장된 데이터로 PPT를 만들어 바로 내려줍니다.
 // PPT 파일은 저장소에 올리지 않습니다(2026-10-01 "다운로드만 제공" 결정). 발행 이력만 남깁니다.
@@ -15,19 +14,13 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { profile, uid } = await requireUser(req);
+    const { uid, brand } = await requireBrandAccess(req, params.id);
     const body = await req.json().catch(() => ({}));
     const ym = body.year_month;
     if (typeof ym !== "string" || !/^\d{4}-\d{2}$/.test(ym)) {
       return NextResponse.json({ error: "year_month는 YYYY-MM 형식이어야 합니다." }, { status: 400 });
     }
     const db = getAdminDb();
-    const brandSnap = await db.collection("brands").doc(params.id).get();
-    if (!brandSnap.exists) return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
-    const brand = { ...(brandSnap.data() as ReportBrand), id: brandSnap.id };
-    if (brand.organization_id !== profile.organization_id) {
-      return NextResponse.json({ error: "이 브랜드에 접근할 권한이 없습니다." }, { status: 403 });
-    }
 
     const dataRef = db.collection("brandMonthlyData").doc(`${params.id}_${ym}`);
     if (body.overrides !== undefined) {
