@@ -1,19 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { collection, doc, getDocs, query, updateDoc, where } from "firebase/firestore";
-import { db } from "@/lib/firebase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthGate } from "@/components/AuthGate";
 import { Navbar } from "@/components/Navbar";
 import { authedFetch } from "@/lib/apiClient";
+import { useDirectory } from "@/lib/firestore/useDirectory";
 import type { ReportBrand } from "@/lib/types";
 
 // 그로스잇 브랜드 정기 성과 리포트 자동화 — "Monthly Report 발행" 메뉴가 사용할 브랜드 설정을
-// 관리하는 화면입니다. 로그인한 사용자 누구나 브랜드를 추가할 수 있고(등록자 = 담당자),
-// 등록 후 CMS URL 등을 고치는 수정/비활성화는 담당자 본인 또는 슈퍼 관리자만 할 수 있습니다
-// (firestore.rules의 /brands 규칙과 짝을 이룹니다 — 여기서는 UX상 버튼을 숨기는 정도로만
-// 처리하고, 실제 권한 검증은 규칙이 담당합니다).
+// 관리하는 화면입니다. 로그인한 사용자 누구나 브랜드를 추가할 수 있고(등록자 = 기본 담당자),
+// 2026-10-06부터 담당자는 같은 회사 회원 중에서 여러 명을 지정할 수 있습니다. 브랜드 목록·수집·수정·
+// 비활성화는 슈퍼 관리자와 해당 브랜드의 담당자만 할 수 있고, 담당자가 아닌 사람에게는 목록에도
+// 보이지 않습니다. 모든 조회·쓰기는 서버 API(/api/brands…)가 권한을 검증합니다.
 
 function BrandsContent() {
   const { profile } = useAuth();
@@ -114,12 +113,9 @@ function BrandsContent() {
     if (!profile) return;
     try {
       setLoadError(null);
-      // projects/page.tsx와 동일한 이유로 정렬은 클라이언트에서 처리합니다(where 단일 필드만 쓰면
-      // 복합 색인이 필요 없어, 색인 배포 여부에 자동화 관리 화면이 좌우되지 않습니다).
-      const snap = await getDocs(query(collection(db, "brands"), where("organization_id", "==", profile.organization_id)));
-      const loaded = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ReportBrand));
-      loaded.sort((a, b) => b.created_at - a.created_at);
-      setBrands(loaded);
+      // 서버가 권한(슈퍼 관리자 전체 / 담당자는 본인 담당 브랜드만)에 맞게 걸러서 최신순으로 내려줍니다.
+      const data = await authedFetch("/api/brands");
+      setBrands((data.brands ?? []) as ReportBrand[]);
     } catch (error) {
       console.error("[BrandsPage] 브랜드 목록 조회 실패:", error);
       setLoadError("브랜드 목록을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.");
@@ -135,7 +131,7 @@ function BrandsContent() {
   // 문서를 실제로 지우지 않고 brand_status만 바꿉니다(회사/부서/사용자 삭제와 동일한 원칙).
   async function setStatus(b: ReportBrand, status: "ACTIVE" | "INACTIVE") {
     try {
-      await updateDoc(doc(db, "brands", b.id), { brand_status: status, updated_at: Date.now() });
+      await authedFetch("/api/brands", { method: "PATCH", body: JSON.stringify({ id: b.id, brand_status: status }) });
       setConfirmToggleId(null);
       await load();
     } catch (error) {
@@ -144,8 +140,9 @@ function BrandsContent() {
     }
   }
 
-  function canEdit(b: ReportBrand) {
-    return !!profile && (profile.org_role === "SUPER_ADMIN" || profile.id === b.created_by);
+  // 서버가 접근 가능한 브랜드(슈퍼 관리자 또는 담당자)만 내려주므로, 목록에 보이는 브랜드는 모두 수정 가능합니다.
+  function canEdit(_b: ReportBrand) {
+    return !!profile;
   }
 
   const activeBrands = brands.filter((b) => b.brand_status !== "INACTIVE");
@@ -247,7 +244,7 @@ function BrandsContent() {
                     {collectingId === b.id ? "수집 중..." : "지금 수집(테스트)"}
                   </button>
                 )}
-                {canEdit(b) ? (
+                {canEdit(b) && (
                   <>
                     <button className="btn btn-secondary text-xs" onClick={() => setModalMode(b)}>
                       수정
@@ -268,8 +265,6 @@ function BrandsContent() {
                       </button>
                     )}
                   </>
-                ) : (
-                  <span className="text-xs text-gray-400">담당자만 수정 가능</span>
                 )}
               </div>
             </div>
@@ -331,10 +326,17 @@ function BrandModal({
   onDone: () => void;
 }) {
   const { profile } = useAuth();
+  const dir = useDirectory(profile?.organization_id);
   const [companyName, setCompanyName] = useState(brand?.company_name ?? "");
   const [brandName, setBrandName] = useState(brand?.brand_name ?? "");
   const [cmsUrl, setCmsUrl] = useState(brand?.cms_url ?? "");
-  const [managerName, setManagerName] = useState(brand?.manager_name ?? profile?.user_name ?? "");
+  // 담당자: 생성자는 항상 포함(해제 불가), 나머지는 같은 회사 회원 중에서 추가/해제. 기존 브랜드 중
+  // manager_uids가 없는 것은 생성자 1명만 담당자입니다.
+  const creatorUid = brand?.created_by ?? profile?.id ?? "";
+  const [extraManagerUids, setExtraManagerUids] = useState<string[]>(
+    (brand?.manager_uids ?? []).filter((u) => u !== (brand?.created_by ?? profile?.id))
+  );
+  const [managerPick, setManagerPick] = useState("");
   const [phoneVerification, setPhoneVerification] = useState(brand?.phone_verification_required ?? false);
   const [serviceOpenDate, setServiceOpenDate] = useState(brand?.service_open_date ?? "");
   // 그로스잇 수수료 기본값(%) — 화면④ 수수료 입력란에 미리 채워지는 값(빈칸 = 미입력).
@@ -351,7 +353,7 @@ function BrandModal({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!profile || !companyName.trim() || !brandName.trim() || !cmsUrl.trim() || !managerName.trim()) return;
+    if (!profile || !companyName.trim() || !brandName.trim() || !cmsUrl.trim()) return;
     if (isCreate && (feeDeliveryRate.trim() === "" || feePickupRate.trim() === "")) {
       setError("그로스잇 배달·픽업 수수료율을 입력해주세요(수수료가 없으면 0).");
       return;
@@ -363,7 +365,7 @@ function BrandModal({
         company_name: companyName.trim(),
         brand_name: brandName.trim(),
         cms_url: cmsUrl.trim(),
-        manager_name: managerName.trim(),
+        manager_uids: extraManagerUids,
         phone_verification_required: phoneVerification,
         service_open_date: serviceOpenDate.trim() || null,
         // 수정 화면에서 비워두면 기존 저장된 계정 정보를 그대로 유지합니다(재입력 강제 안 함).
@@ -422,8 +424,47 @@ function BrandModal({
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">담당자명</label>
-            <input className="input w-full" value={managerName} onChange={(e) => setManagerName(e.target.value)} required />
+            <label className="mb-1 block text-xs font-medium text-gray-600">담당자 (복수 지정 가능)</label>
+            <div className="mb-2 flex flex-wrap gap-1">
+              <span className="badge bg-navy/10 text-navy">
+                {dir.users[creatorUid]?.user_name ?? (isCreate ? profile?.user_name : "등록자")} (등록자)
+              </span>
+              {extraManagerUids.map((u) => (
+                <span key={u} className="badge bg-emerald-100 text-emerald-800">
+                  {dir.users[u]?.user_name ?? "(알 수 없는 사용자)"}
+                  <button
+                    type="button"
+                    className="ml-1 text-emerald-900"
+                    aria-label="담당자 해제"
+                    onClick={() => setExtraManagerUids((prev) => prev.filter((x) => x !== u))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+            <select
+              className="input w-full"
+              value={managerPick}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) setExtraManagerUids((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                setManagerPick("");
+              }}
+            >
+              <option value="">{dir.loading ? "회원 목록 불러오는 중..." : "+ 담당자 추가 (회원 선택)"}</option>
+              {Object.values(dir.users)
+                .filter((u) => u.user_status === "ACTIVE" && u.id !== creatorUid && !extraManagerUids.includes(u.id))
+                .sort((a, b) => a.user_name.localeCompare(b.user_name))
+                .map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {dir.displayName(u.id)}
+                  </option>
+                ))}
+            </select>
+            <p className="mt-1 text-[11px] text-gray-400">
+              담당자와 슈퍼 관리자만 이 브랜드의 수집·리포트 발행·수정을 할 수 있고, 다른 회원에게는 보이지 않습니다.
+            </p>
           </div>
           <label className="flex items-center gap-2 text-xs text-gray-600">
             <input
