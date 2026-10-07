@@ -94,9 +94,33 @@ export interface MemberOrderAgg {
   truncated: boolean;
 }
 
+// 월별 매장·메뉴 전체 목록(압축본) — brandMonthlyData는 문서 1MB 제한 때문에 매장·메뉴를 상위 일부만 남기지만,
+// "기존/신규 매장 증감 분해"와 "메뉴 변화"는 전월과 같은 매장·메뉴를 짝지어 비교해야 하므로 전체가 필요합니다.
+// 숫자·짧은 이름만 나란히 놓은 배열(parallel arrays)이라 매장 600곳·메뉴 수백 개도 문서 하나에 들어갑니다.
+export interface MonthBreakdown {
+  stores: {
+    id: number[]; // storeId (없으면 -1)
+    nm: string[];
+    ap: number[]; // 앱결제액(우리가잇다)
+    ao: number[]; // 앱 주문 수
+    tp: number[]; // 전체 결제액(온라인+오프라인)
+  };
+  items: {
+    key: string[]; // itemCd 기준 "cd:100019", 없으면 "nm:메뉴명" — 이름이 바뀌거나 표기가 달라도 같은 메뉴로 묶기 위함
+    nm: string[];
+    ap: number[]; // 앱결제액
+    aq: number[]; // 앱 판매수량(CMS가 주는 수량 필드, 없으면 0)
+    tp: number[]; // 전체 결제액
+    tq: number[]; // 전체 판매수량
+  };
+  // 메뉴 응답의 필드명 샘플(수량 필드 확인용) — 개인정보 없음
+  fields: { all: string[]; app: string[] } | null;
+}
+
 export interface ExtrasResult {
   extras: CmsExtras;
   memberOrderAgg: MemberOrderAgg | null;
+  breakdown: MonthBreakdown | null;
 }
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -284,9 +308,19 @@ async function fetchSalesStore(getJson: GetJson, cmsUrl: string, ck: string, sta
     withApp.length > STORE_KEEP_TOP + STORE_KEEP_BOTTOM
       ? [...withApp.slice(0, STORE_KEEP_TOP), ...withApp.slice(withApp.length - STORE_KEEP_BOTTOM)]
       : withApp;
+  // 압축 전체 목록 — 앱 매출이나 전체 매출이 있는 매장은 하나도 빼지 않고 담습니다.
+  const live = stores.filter((r) => (r.app?.total.pay ?? 0) > 0 || r.all.total.pay > 0);
+  const compact: MonthBreakdown["stores"] = {
+    id: live.map((r) => r.storeId ?? -1),
+    nm: live.map((r) => r.name),
+    ap: live.map((r) => r.app?.total.pay ?? 0),
+    ao: live.map((r) => r.app?.total.ord ?? 0),
+    tp: live.map((r) => r.all.total.pay),
+  };
   return {
     rows: [...(total ? [total] : []), ...kept.map(slimStoreRow)],
     meta: { totalStores: stores.length, withAppStores: withApp.length, kept: kept.length },
+    compact,
   };
 }
 
@@ -309,7 +343,7 @@ async function fetchSalesTotalOnly(getJson: GetJson, cmsUrl: string, ck: string,
   const row = toSalesRow(first, str(rec(first).gubun) || "전체");
   const appFirst = arr(rec(appJ).list)[0];
   row.app = appFirst ? toAppSplit(appFirst) : null;
-  return { rows: [row], meta: null as { totalStores: number; withAppStores: number; kept: number } | null };
+  return { rows: [row], meta: null as { totalStores: number; withAppStores: number; kept: number } | null, compact: null as MonthBreakdown["stores"] | null };
 }
 
 // 온라인 안의 채널별(우리가잇다·배달의민족·쿠팡이츠…) 합계 — 전체 행의 salesStatsList가 채널 단위로 쪼개집니다.
@@ -373,7 +407,32 @@ async function fetchSalesItem(getJson: GetJson, cmsUrl: string, ck: string, star
     else rows.push(row);
   }
   rows.sort((a, b) => (b.app?.total.pay ?? 0) - (a.app?.total.pay ?? 0) || b.all.total.pay - a.all.total.pay);
-  return [...(totalRow ? [totalRow] : []), ...rows.slice(0, TOP_ITEMS)];
+
+  // 전체 메뉴 압축 목록 — 판매수량은 CMS 응답에서 수량으로 보이는 필드를 순서대로 찾아 씁니다(필드명은 fields에 남김).
+  const allOnly = allRows.filter((o) => str(o.gubun) !== "전체");
+  const appRawByKey = new Map<string, Record<string, unknown>>();
+  for (const o of appRows) appRawByKey.set(itemKey(o), o);
+  const compact: MonthBreakdown["items"] = { key: [], nm: [], ap: [], aq: [], tp: [], tq: [] };
+  for (const o of allOnly) {
+    const k = itemKey(o);
+    const a = appRawByKey.get(k);
+    compact.key.push(k);
+    compact.nm.push(str(o.gubun));
+    compact.ap.push(a ? num(a.totalPayAmt) : 0);
+    compact.aq.push(a ? qtyOf(a) : 0);
+    compact.tp.push(num(o.totalPayAmt));
+    compact.tq.push(qtyOf(o));
+  }
+  const fields = allRows[0] ? { all: Object.keys(allRows[0]).slice(0, 60), app: appRows[0] ? Object.keys(appRows[0]).slice(0, 60) : [] } : null;
+  return { rows: [...(totalRow ? [totalRow] : []), ...rows.slice(0, TOP_ITEMS)], compact, fields };
+}
+// 판매수량 필드 후보 — 메뉴 응답에서 주문 수(totalOrderCnt)는 0으로 오는 경우가 있어 수량 필드를 따로 찾습니다.
+function qtyOf(o: Record<string, unknown>): number {
+  for (const k of ["totalSalesCnt", "salesCnt", "totalItemCnt", "itemCnt", "totalQty", "qty", "totalOrderCnt"]) {
+    const v = o[k];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  }
+  return 0;
 }
 
 async function fetchGenderAge(getJson: GetJson, cmsUrl: string, ck: string, startDt: string, endDt: string) {
@@ -803,11 +862,21 @@ export async function collectExtras(
     section("주문조회 집계", () => fetchOrders(getJson, cmsUrl, ck, startDt, endDt), diag),
   ]);
 
+  const storeCompact = salesStoreResult && "compact" in salesStoreResult ? salesStoreResult.compact : null;
+  const breakdown: MonthBreakdown | null =
+    storeCompact || salesItem
+      ? {
+          stores: storeCompact ?? { id: [], nm: [], ap: [], ao: [], tp: [] },
+          items: salesItem ? salesItem.compact : { key: [], nm: [], ap: [], aq: [], tp: [], tq: [] },
+          fields: salesItem ? salesItem.fields : null,
+        }
+      : null;
+
   return {
     extras: {
       salesStore: salesStoreResult ? salesStoreResult.rows : null,
       salesStoreMeta: salesStoreResult ? salesStoreResult.meta : null,
-      salesItem,
+      salesItem: salesItem ? salesItem.rows : null,
       salesGenderAge,
       onlineChannels,
       dailyBrandSet,
@@ -821,5 +890,6 @@ export async function collectExtras(
       diag,
     },
     memberOrderAgg: ordersResult ? ordersResult.members : null,
+    breakdown,
   };
 }
