@@ -2,6 +2,8 @@
 // 서버(API)와 클라이언트(화면④ 미리보기)가 같은 코드를 씁니다.
 
 import type { BrandFeeDefaults } from "@/lib/types";
+import type { MonthBreakdown } from "@/lib/cmsAutomation/collectExtras";
+import type { GrowthSplit, MenuChange } from "./breakdownMetrics";
 
 // ── 월별 요약(과거 월 비교용, 문서 1건에서 뽑은 작은 스냅샷) ─────────────────────
 export interface MonthSnapshot {
@@ -75,6 +77,7 @@ export interface ReportInput {
   members: MemberMetrics | null;
   overrides: ReportOverrides;
   prevActions: ActionItem[]; // 전월 리포트에 담당자가 적었던 "익월 액션" — 이번 달 이행 점검용
+  breakdowns?: { cur: MonthBreakdown | null; prev: MonthBreakdown | null; prev2: MonthBreakdown | null }; // 매장·메뉴 전체 목록(당월·전월·전전월)
   prevDaily?: { date: string; amount: number; orders: number }[]; // 전월 일별 앱 매출(일평균·일별 추이 비교용, 없으면 생략)
   generatedAt: number;
 }
@@ -161,5 +164,8 @@ export interface ReportModel {
     note: string;
   };
   // skipped=true: 데이터 한계로 일부러 리포트에서 제외한 항목(점검 필요가 아니라 "제외"로 표시)
+  // 매장·메뉴 전체 목록이 있을 때만 값이 채워집니다(없으면 null — 리포트에서 해당 섹션을 생략).
+  growth: GrowthSplit | null;
+  menuChange: MenuChange | null;
   checklist: { item: string; ok: boolean; note: string; skipped?: boolean }[];
 }
