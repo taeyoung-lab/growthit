@@ -1,24 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
 import { requireUser, ApiAuthError } from "@/lib/adminAuthCheck";
+import { brandManagerUids, canAccessBrand } from "@/lib/brandAccess";
 import { encryptCmsPassword } from "@/lib/cmsCredentials";
-import type { ReportBrand, BrandCredentials, BrandFeeDefaults } from "@/lib/types";
+import type { ReportBrand, BrandCredentials, BrandFeeDefaults, UserProfile } from "@/lib/types";
 
-// 그로스잇 브랜드 정기 성과 리포트 자동화 — 브랜드 생성/수정 전용 API.
-// src/app/brands/page.tsx(브랜드명·CMS URL 등 비밀 아닌 필드)는 기존처럼 클라이언트 Firestore SDK로
-// 직접 읽고 쓰지만, CMS 로그인 자격증명이 함께 들어가는 생성/수정만큼은 반드시 이 라우트를 거칩니다
-// — 비밀번호를 서버(firebase-admin)에서만 암호화해 brandCredentials 컬렉션에 쓰기 위함입니다
-// (그 컬렉션은 firestore.rules가 클라이언트 read/write를 전면 차단).
-//
-// 2026-10-01 기준: 생성 시 service_open_date가 있으면 backfill_status를 PENDING으로 표시만 해둡니다.
-// 실제 CMS 자동 로그인·데이터 수집(백필 포함) 로직은 아직 구현되지 않았습니다 — 브랜드별 CMS 로그인
-// 폼의 실제 선택자(selector) 확인이 먼저 필요합니다(진행 중, 담당자 확인 대기).
+// 그로스잇 브랜드 정기 성과 리포트 자동화 — 브랜드 목록/생성/수정 API.
+// 2026-10-06 이후 brands 컬렉션은 firestore.rules에서 클라이언트 직접 접근을 전부 막아 두었고,
+// 목록(GET)·생성(POST)·수정/삭제(PATCH)가 모두 이 라우트(Admin SDK)를 거칩니다. CMS 비밀번호는
+// 서버에서만 암호화해 brandCredentials에 씁니다. 접근 권한은 슈퍼 관리자 + 브랜드 담당자(복수,
+// manager_uids)이며 판단 로직은 src/lib/brandAccess.ts에 있습니다.
 
 interface BrandRequestBody {
   company_name: string;
   brand_name: string;
   cms_url: string;
-  manager_name: string;
+  // 2026-10-06: 담당자는 같은 조직의 기존 회원(users)에서 uid로 지정합니다(복수 가능). 생성자는 항상
+  // 자동 포함되고, 비워 보내면(생성) 생성자 1명만, (수정 시) 필드를 아예 안 보내면 기존 담당자를 유지합니다.
+  // manager_name(표시용 이름)은 서버가 담당자들의 이름으로 만들기 때문에 더 이상 받지 않습니다.
+  manager_uids?: string[];
   phone_verification_required: boolean;
   service_open_date: string | null; // YYYY-MM-DD, 선택
   cms_username: string | null; // 비워두면(수정 시) 기존 저장값 유지
@@ -53,7 +53,9 @@ function validate(body: Partial<BrandRequestBody>): string | null {
   if (!body.company_name?.trim()) return "회사명은 필수입니다.";
   if (!body.brand_name?.trim()) return "브랜드명은 필수입니다.";
   if (!body.cms_url?.trim()) return "CMS 사이트 URL은 필수입니다.";
-  if (!body.manager_name?.trim()) return "담당자명은 필수입니다.";
+  if (body.manager_uids !== undefined && (!Array.isArray(body.manager_uids) || body.manager_uids.some((u) => typeof u !== "string"))) {
+    return "담당자 지정 형식이 올바르지 않습니다.";
+  }
   if (body.service_open_date && !/^\d{4}-\d{2}-\d{2}$/.test(body.service_open_date)) {
     return "서비스 오픈일 형식이 올바르지 않습니다(YYYY-MM-DD).";
   }
@@ -86,6 +88,26 @@ function validateNewFeeRates(body: Partial<BrandRequestBody>): string | null {
   return null;
 }
 
+// 요청된 담당자 uid들을 검증해(같은 조직·활성 계정) 생성자를 포함한 최종 목록과 표시용 이름을 돌려줍니다.
+async function resolveManagers(
+  db: FirebaseFirestore.Firestore,
+  organizationId: string,
+  creatorUid: string,
+  requested: string[] | undefined
+): Promise<{ uids: string[]; name: string } | { error: string }> {
+  const uids = Array.from(new Set([creatorUid, ...(requested ?? [])]));
+  const snaps = await Promise.all(uids.map((u) => db.collection("users").doc(u).get()));
+  const names: string[] = [];
+  for (let i = 0; i < snaps.length; i++) {
+    const u = snaps[i].exists ? (snaps[i].data() as UserProfile) : null;
+    if (!u || u.organization_id !== organizationId || u.user_status !== "ACTIVE") {
+      return { error: "담당자는 같은 회사의 활성 회원 중에서만 지정할 수 있습니다." };
+    }
+    names.push(u.user_name);
+  }
+  return { uids, name: names.join(", ") };
+}
+
 // 생성: 로그인한 사용자 누구나(등록자 = 담당자, firestore.rules의 /brands create 규칙과 동일 원칙).
 export async function POST(req: NextRequest) {
   try {
@@ -97,6 +119,8 @@ export async function POST(req: NextRequest) {
     const now = Date.now();
     const db = getAdminDb();
     const brandRef = db.collection("brands").doc();
+    const managers = await resolveManagers(db, profile.organization_id, uid, body.manager_uids);
+    if ("error" in managers) return NextResponse.json({ error: managers.error }, { status: 400 });
 
     const hasCredentials = !!(body.cms_username && body.cms_password);
 
@@ -106,8 +130,9 @@ export async function POST(req: NextRequest) {
       company_name: body.company_name!.trim(),
       brand_name: body.brand_name!.trim(),
       cms_url: body.cms_url!.trim(),
-      manager_name: body.manager_name!.trim(),
+      manager_name: managers.name,
       created_by: uid,
+      manager_uids: managers.uids,
       phone_verification_required: !!body.phone_verification_required,
       has_saved_credentials: hasCredentials,
       service_open_date: body.service_open_date?.trim() || null,
@@ -150,13 +175,50 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// 수정: 담당자 본인(created_by) 또는 SUPER_ADMIN만 — firestore.rules의 /brands update 규칙과 동일 원칙.
+// 목록: 슈퍼 관리자는 같은 조직의 전체 브랜드, 그 외에는 본인이 담당자인 브랜드만(2026-10-06).
+// 브랜드 문서에는 비밀값이 없지만(CMS 계정은 brandCredentials), 담당자가 아닌 사람에게는 목록에도 노출하지 않습니다.
+// firestore.rules는 brands를 클라이언트에서 읽지 못하게 막고 이 API(Admin SDK)로만 읽습니다.
+export async function GET(req: NextRequest) {
+  try {
+    const { uid, profile } = await requireUser(req);
+    const snap = await getAdminDb().collection("brands").where("organization_id", "==", profile.organization_id).get();
+    const brands = snap.docs
+      .map((d) => ({ ...(d.data() as ReportBrand), id: d.id }))
+      .filter((b) => canAccessBrand(profile, uid, b))
+      .map((b) => ({ ...b, manager_uids: brandManagerUids(b) }))
+      .sort((a, b) => b.created_at - a.created_at);
+    return NextResponse.json({ brands });
+  } catch (e) {
+    if (e instanceof ApiAuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    console.error("[GET /api/brands]", e);
+    return NextResponse.json({ error: "브랜드 목록을 불러오지 못했습니다." }, { status: 500 });
+  }
+}
+
+// 수정: 슈퍼 관리자 또는 이 브랜드의 담당자(복수)만 — brandAccess.ts의 canAccessBrand와 동일 원칙.
+// 담당자 목록(manager_uids)도 같은 권한자가 바꿀 수 있고, 생성자는 목록에서 뺄 수 없습니다.
+// {id, brand_status}만 보내면 활성/비활성(삭제·복원) 전환으로 처리합니다.
 // cms_username/cms_password를 비워서 보내면 기존 저장된 계정 정보는 그대로 둡니다(재입력 강제 안 함).
 export async function PATCH(req: NextRequest) {
   try {
     const { uid, profile } = await requireUser(req);
-    const body = (await req.json()) as Partial<BrandRequestBody> & { id?: string };
+    const body = (await req.json()) as Partial<BrandRequestBody> & { id?: string; brand_status?: string };
     if (!body.id) return NextResponse.json({ error: "id가 필요합니다." }, { status: 400 });
+
+    if (body.brand_status !== undefined && body.company_name === undefined) {
+      if (body.brand_status !== "ACTIVE" && body.brand_status !== "INACTIVE") {
+        return NextResponse.json({ error: "brand_status 값이 올바르지 않습니다." }, { status: 400 });
+      }
+      const ref = getAdminDb().collection("brands").doc(body.id);
+      const s = await ref.get();
+      if (!s.exists) return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
+      if (!canAccessBrand(profile, uid, s.data() as ReportBrand)) {
+        return NextResponse.json({ error: "이 브랜드를 수정할 권한이 없습니다." }, { status: 403 });
+      }
+      await ref.update({ brand_status: body.brand_status, updated_at: Date.now() });
+      return NextResponse.json({ ok: true });
+    }
+
     const invalid = validate(body);
     if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
 
@@ -166,7 +228,7 @@ export async function PATCH(req: NextRequest) {
     if (!snap.exists) return NextResponse.json({ error: "대상 브랜드를 찾을 수 없습니다." }, { status: 404 });
     const existing = snap.data() as ReportBrand;
 
-    const canEdit = profile.org_role === "SUPER_ADMIN" || existing.created_by === uid;
+    const canEdit = canAccessBrand(profile, uid, existing);
     if (!canEdit) return NextResponse.json({ error: "이 브랜드를 수정할 권한이 없습니다." }, { status: 403 });
 
     const now = Date.now();
@@ -176,11 +238,17 @@ export async function PATCH(req: NextRequest) {
       company_name: body.company_name!.trim(),
       brand_name: body.brand_name!.trim(),
       cms_url: body.cms_url!.trim(),
-      manager_name: body.manager_name!.trim(),
       phone_verification_required: !!body.phone_verification_required,
       service_open_date: body.service_open_date?.trim() || null,
       updated_at: now,
     };
+    // 담당자 목록을 보낸 경우에만 다시 계산(생성자 항상 포함). 안 보내면 기존 담당자·표시 이름 유지.
+    if (body.manager_uids !== undefined) {
+      const managers = await resolveManagers(db, existing.organization_id, existing.created_by, body.manager_uids);
+      if ("error" in managers) return NextResponse.json({ error: managers.error }, { status: 400 });
+      updates.manager_uids = managers.uids;
+      updates.manager_name = managers.name;
+    }
     if (wantsCredentialChange) updates.has_saved_credentials = true;
     const feeDefaults = buildFeeDefaults(body, existing.fee_defaults);
     if (feeDefaults) updates.fee_defaults = feeDefaults;
