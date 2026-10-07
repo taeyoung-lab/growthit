@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { collection, getDocs, query, where } from "firebase/firestore";
-import { db } from "@/lib/firebase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthGate } from "@/components/AuthGate";
 import { Navbar } from "@/components/Navbar";
@@ -126,14 +124,10 @@ function ReportsContent() {
       if (!profile) return;
       try {
         setLoadError(null);
-        // brands/page.tsx와 동일한 패턴 — 비활성화된 브랜드는 발행 대상에서 제외합니다
-        // (기획 문서 화면① "비고": 비활성화된 브랜드는 목록에서 제외).
-        const snap = await getDocs(
-          query(collection(db, "brands"), where("organization_id", "==", profile.organization_id))
-        );
-        const loaded = snap.docs
-          .map((d) => ({ id: d.id, ...d.data() } as ReportBrand))
-          .filter((b) => b.brand_status !== "INACTIVE");
+        // 서버(GET /api/brands)가 슈퍼 관리자는 전체, 담당자는 본인 담당 브랜드만 내려줍니다(2026-10-06).
+        // 비활성화된 브랜드는 발행 대상에서 제외합니다(기획 문서 화면① "비고": 비활성화된 브랜드는 목록에서 제외).
+        const data = await authedFetch("/api/brands");
+        const loaded = ((data.brands ?? []) as ReportBrand[]).filter((b) => b.brand_status !== "INACTIVE");
         loaded.sort((a, b) => a.brand_name.localeCompare(b.brand_name));
         setBrands(loaded);
       } catch (error) {
