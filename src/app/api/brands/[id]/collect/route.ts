@@ -2,12 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/firebase/admin";
 import { ApiAuthError } from "@/lib/adminAuthCheck";
 import { requireBrandAccess } from "@/lib/brandAccess";
-import { decryptCmsPassword } from "@/lib/cmsCredentials";
-import { loginToCms } from "@/lib/cmsAutomation/login";
-import { collectMonthlyData } from "@/lib/cmsAutomation/collect";
+import { collectAndStoreMonth } from "@/lib/cmsAutomation/collectAndStore";
 import { CmsAutomationError } from "@/lib/cmsAutomation/types";
-import { saveMemberAggregates, fitMonthlyDataSize } from "@/lib/cmsAutomation/memberAggStore";
-import type { BrandCredentials, BrandMonthlyData } from "@/lib/types";
+import type { BrandCredentials } from "@/lib/types";
 
 // 그로스잇 브랜드 CMS 자동 수집 트리거 — 저장된 계정으로 헤드리스 브라우저 로그인 후(login.ts),
 // 로그인으로 얻은 쿠키로 JSON API를 호출해(collect.ts) brandMonthlyData에 raw 데이터를 씁니다.
@@ -49,7 +46,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     const yearMonth = body.year_month;
 
     const db = getAdminDb();
-    const brandRef = db.collection("brands").doc(params.id);
     const credsSnap = await db.collection("brandCredentials").doc(params.id).get();
     if (!credsSnap.exists) {
       return NextResponse.json(
@@ -66,18 +62,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       );
     }
 
-    let collected;
+    let data;
     try {
-      const session = await loginToCms({
-        cmsUrl: brand.cms_url,
-        username: creds.cms_username,
-        password: decryptCmsPassword(creds.cms_password_encrypted),
-        phoneVerificationRequired: brand.phone_verification_required,
-        fixedVerificationCode: creds.fixed_verification_code_encrypted
-          ? decryptCmsPassword(creds.fixed_verification_code_encrypted)
-          : null,
-      });
-      collected = await collectMonthlyData(brand.cms_url, session, yearMonth);
+      data = await collectAndStoreMonth({ brandId: params.id, brand, creds, yearMonth, collectedBy: uid, source: "MANUAL" });
     } catch (e) {
       if (e instanceof CmsAutomationError) {
         console.error(`[POST /api/brands/${params.id}/collect] ${e.step}`, e);
@@ -90,49 +77,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         return NextResponse.json({ error: e.message + hint, step: e.step }, { status: 502 });
       }
       throw e;
-    }
-
-    const now = Date.now();
-    const docId = `${params.id}_${yearMonth}`;
-    const existing = await db.collection("brandMonthlyData").doc(docId).get();
-
-    const data: BrandMonthlyData = {
-      id: docId,
-      organization_id: brand.organization_id,
-      brand_id: params.id,
-      year_month: yearMonth,
-      source: "MANUAL",
-      data: fitMonthlyDataSize({
-        dashboard: collected.dashboard,
-        settlementsSales: collected.settlementsSales,
-        settlementSource: collected.settlementSource,
-        targetGroupStats: collected.targetGroupStats,
-        storeManage: collected.storeManage,
-        memberStats: collected.memberStats,
-        extras: collected.extras,
-      }),
-      // 기존에 담당자가 화면④에서 직접 고친 값(overrides)이 있다면 재수집 시에도 보존합니다 —
-      // 원본(data)만 최신 수집값으로 갈아끼우고, 사람이 직접 고친 값은 자동 덮어쓰기 대상이 아닙니다.
-      overrides: (existing.exists && (existing.data() as BrandMonthlyData).overrides) || {},
-      published: (existing.exists && (existing.data() as BrandMonthlyData).published) || false,
-      collected_at: collected.collectedAt,
-      collected_by: uid,
-      updated_at: now,
-    };
-    await db.collection("brandMonthlyData").doc(docId).set(data);
-    // 회원별 월간 구매 집계는 용량 때문에 별도 컬렉션에 저장합니다. 실패해도 위 본 데이터는 이미 저장됐으므로
-    // 수집 전체를 실패로 돌리지 않고 경고만 남깁니다(회원 지표만 비게 됨).
-    if (collected.memberOrderAgg) {
-      try {
-        await saveMemberAggregates(db, {
-          brandId: params.id,
-          organizationId: brand.organization_id,
-          yearMonth,
-          agg: collected.memberOrderAgg,
-        });
-      } catch (e) {
-        console.warn(`[POST /api/brands/${params.id}/collect] 회원 집계 저장 실패`, e);
-      }
     }
 
     return NextResponse.json({ ok: true, year_month: yearMonth, data });
