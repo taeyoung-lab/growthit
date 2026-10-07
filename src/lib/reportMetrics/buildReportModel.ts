@@ -5,6 +5,7 @@
 import type { CmsExtras, SalesRow } from "@/lib/cmsAutomation/collectExtras";
 import { DEFAULT_BENCHMARK_FEE_RATE } from "@/lib/types";
 import { fmtPct, fmtSigned, fmtWon, monthShort } from "./format";
+import { computeGrowthSplit, computeMenuChange } from "./breakdownMetrics";
 import { computeSalesBasis } from "./salesBasis";
 import { snapshotFromData } from "./snapshot";
 import type { ActionItem, ActionReview, Kpi, MonthSnapshot, ReportInput, ReportModel } from "./types";
@@ -153,6 +154,10 @@ export function buildReportModel(input: ReportInput): ReportModel {
     { key: "newMembersDay", label: "신규 회원/일", unit: "명" as const, value: perDay(cur.newMembers, days), prev: perDay(prev?.newMembers, prevDays) },
   ].map((x) => ({ ...x, value: x.value == null ? null : Math.round(x.value), prev: x.prev == null ? null : Math.round(x.prev), pct: pctOf(x.value, x.prev) }));
   const dailyAvg = dailyAvgItems.some((x) => x.value != null) ? { days, prevDays, items: dailyAvgItems } : null;
+  // 매장·메뉴 전체 목록으로 기존/신규 매장 분해·메뉴 변화 계산(전월 목록이 없으면 null)
+  const bd = input.breakdowns;
+  const growth = bd?.cur && bd.prev ? computeGrowthSplit(bd.cur, bd.prev, bd.prev2, days, daysIn(prevYm)) : null;
+  const menuChange = bd?.cur && bd.prev ? computeMenuChange(bd.cur, bd.prev, days, daysIn(prevYm)) : null;
   const ord = extras?.orders ?? null;
   const dow = ord ? DOW.map((label, i) => ({ label, orders: ord.byDow[i] ?? 0, amount: ord.byDowAmount[i] ?? 0 })) : [];
 
@@ -307,6 +312,8 @@ export function buildReportModel(input: ReportInput): ReportModel {
     },
     { item: "그로스잇 수수료율(배달·픽업)", ok: !fee.missingFee && deliveryRate !== null && pickupRate !== null, note: fee.missingFee ? "미입력 — 절감액 계산 불가" : deliveryRate === null || pickupRate === null ? "일부 미입력(해당 유형 매출이 없어 계산에는 영향 없음)" : "입력됨" },
     { item: "정산 데이터 경로", ok: str(data.settlementSource) !== "EXCEL_FALLBACK", note: str(data.settlementSource) === "EXCEL_FALLBACK" ? "CMS 정산 조회 지연으로 엑셀 경로 사용 — 일부 값이 CMS 화면과 다를 수 있음" : "JSON" },
+    { item: "매장별 전월 비교(기존/신규 분해)", ok: !!growth, skipped: !growth, note: growth ? `기존 매장 기준: ${growth.basis}` : "전월 매장 목록이 없어 생략 — 전월 데이터를 다시 수집하면 표시됩니다" },
+    { item: "메뉴 변화", ok: !!menuChange, skipped: !menuChange, note: menuChange ? `${menuChange.basis} 기준` : "전월 메뉴 목록이 없어 생략 — 전월 데이터를 다시 수집하면 표시됩니다" },
     { item: "익월 목표·액션 입력", ok: (overrides.next_goals?.length ?? 0) > 0 || (overrides.actions?.length ?? 0) > 0, note: "화면④에서 입력" },
   ];
 
@@ -379,6 +386,8 @@ export function buildReportModel(input: ReportInput): ReportModel {
       suggestions,
       note: overrides.note ?? "",
     },
+    growth,
+    menuChange,
     checklist,
   };
 }
