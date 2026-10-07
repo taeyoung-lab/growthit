@@ -127,8 +127,12 @@ export interface ReportBrand {
   company_name: string; // 회사명
   brand_name: string; // 브랜드명
   cms_url: string; // CMS 사이트 URL — 최초 등록 시 입력
-  manager_name: string; // 담당자명 (표시용)
-  created_by: ID; // 등록한 사용자 uid — "담당자"로서 수정 권한을 갖는 기준(슈퍼관리자와 함께 유일한 수정 권한자)
+  manager_name: string; // 담당자명 (표시용 — 담당자들의 이름을 ", "로 이은 값, 서버가 manager_uids로부터 만듦)
+  created_by: ID; // 등록한 사용자 uid — 항상 담당자에 포함(해제 불가)
+  // 2026-10-06: 복수 담당자. 이 브랜드의 조회·수집·리포트 발행·수정 권한을 갖는 사용자 uid 목록
+  // (슈퍼 관리자는 목록과 무관하게 항상 접근 가능). 이 필드가 없는 기존 브랜드는 [created_by]로 간주합니다
+  // — src/lib/brandAccess.ts의 brandManagerUids 참고. 생성자는 서버가 항상 포함시킵니다.
+  manager_uids?: ID[];
   // 브랜드별 로그인 방식을 코드 분기 대신 설정값(옵션)으로 일반화한 필드 — 브레댄코처럼
   // ID/PW 로그인 후 전화번호 인증(고정값) 단계가 추가로 있는 브랜드는 true로 등록합니다.
   // 자동화 스크립트는 이 값을 읽어 헤드리스 브라우저에서 해당 단계를 추가로 처리할지 결정합니다.
