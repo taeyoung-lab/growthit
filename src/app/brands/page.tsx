@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthGate } from "@/components/AuthGate";
 import { Navbar } from "@/components/Navbar";
-import { authedFetch } from "@/lib/apiClient";
+import { authedFetch, authedFetchBlob } from "@/lib/apiClient";
 import { useDirectory } from "@/lib/firestore/useDirectory";
 import type { ReportBrand } from "@/lib/types";
 
@@ -30,6 +30,28 @@ function BrandsContent() {
   // 백필(서비스 오픈일~전월 과거 데이터 일괄 수집) 수동 실행/이어하기 버튼 상태.
   const [backfillingId, setBackfillingId] = useState<string | null>(null);
   const [backfillResult, setBackfillResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+
+  // 월별 실적 CSV 내보내기(매출 프로젝션 학습용) — 읽기 전용, 접근 가능한 브랜드의 월별 지표를 한 파일로 받습니다.
+  const [exporting, setExporting] = useState(false);
+  async function exportMonthly() {
+    setExporting(true);
+    try {
+      const { blob, fileName } = await authedFetchBlob("/api/brands/export-monthly", { method: "GET" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName ?? "growthit_monthly.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[BrandsPage] 월별 실적 내보내기 실패:", e);
+      alert(e instanceof Error ? e.message : "내보내기에 실패했습니다.");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   async function runCollect(b: ReportBrand) {
     const now = new Date();
@@ -154,9 +176,14 @@ function BrandsContent() {
       <main className="mx-auto max-w-4xl px-6 py-8">
         <div className="mb-6 flex items-center justify-between">
           <h1 className="text-xl font-bold text-navy">브랜드 관리</h1>
-          <button className="btn btn-primary" onClick={() => setModalMode("create")}>
-            + 브랜드 추가
-          </button>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-secondary" onClick={exportMonthly} disabled={exporting}>
+              {exporting ? "내보내는 중…" : "월별 실적 CSV 내보내기"}
+            </button>
+            <button className="btn btn-primary" onClick={() => setModalMode("create")}>
+              + 브랜드 추가
+            </button>
+          </div>
         </div>
 
         {loadError && <p className="card mb-4 p-4 text-sm text-red-600">{loadError}</p>}
