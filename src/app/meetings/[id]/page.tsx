@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   addDoc,
   collection,
@@ -53,6 +54,11 @@ interface RelatedMeetingLink {
 function MeetingDetailContent({ meetingId }: { meetingId: string }) {
   const { firebaseUser, profile } = useAuth();
   const dir = useDirectory(profile?.organization_id);
+  const router = useRouter();
+
+  // 회의록 전체 삭제 (편집자/슈퍼 관리자) — 2단계 확인
+  const [confirmMeetingDelete, setConfirmMeetingDelete] = useState(false);
+  const [deletingMeeting, setDeletingMeeting] = useState(false);
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
@@ -450,6 +456,18 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
     }
   }
 
+  async function deleteMeeting() {
+    setDeletingMeeting(true);
+    try {
+      await authedFetch(`/api/meetings/${meetingId}`, { method: "DELETE" });
+      router.replace("/");
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "회의록 삭제 실패");
+      setDeletingMeeting(false);
+      setConfirmMeetingDelete(false);
+    }
+  }
+
   async function removeParticipant(p: MeetingUserPermission) {
     if (!confirm(`${dir.displayName(p.user_id)}님을 이 회의 참여자에서 제외할까요?`)) return;
     setParticipantSaving(p.user_id);
@@ -621,9 +639,33 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
             </p>
           </div>
           {isAuthor && (
-            <Link href={`/meetings/${meetingId}/share`} className="btn btn-secondary text-xs">
-              열람자 공유 관리
-            </Link>
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex gap-2">
+                <Link href={`/meetings/${meetingId}/share`} className="btn btn-secondary text-xs">
+                  열람자 공유 관리
+                </Link>
+                {!confirmMeetingDelete && (
+                  <button className="btn btn-secondary text-xs" onClick={() => setConfirmMeetingDelete(true)}>
+                    회의록 삭제
+                  </button>
+                )}
+              </div>
+              {confirmMeetingDelete && (
+                <div className="card flex flex-col items-end gap-2 p-3 text-xs">
+                  <p className="text-right text-ink">
+                    이 회의록과 과제·질의·결정사항 등 모든 내용이 영구 삭제되며 되돌릴 수 없습니다. 삭제할까요?
+                  </p>
+                  <div className="flex gap-2">
+                    <button className="btn btn-accent text-xs" disabled={deletingMeeting} onClick={deleteMeeting}>
+                      {deletingMeeting ? "삭제 중…" : "예, 삭제합니다"}
+                    </button>
+                    <button className="btn btn-secondary text-xs" disabled={deletingMeeting} onClick={() => setConfirmMeetingDelete(false)}>
+                      아니오
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
 
