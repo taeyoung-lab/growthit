@@ -258,6 +258,8 @@ function NewMeetingContent() {
         due_date: t.due_date || null,
         created_by_user_id: firebaseUser.uid,
         assignee_user_ids: t.assignee_user_ids,
+        // 회의의 현재 member_uids를 그대로 복사 (LIST 쿼리 보안 규칙 제약 우회용 — firestore.rules 참고)
+        member_uids: [firebaseUser.uid],
         created_at: now,
         updated_at: now,
       });
@@ -271,6 +273,8 @@ function NewMeetingContent() {
         child_meeting_id: meetingRef.id,
         relation_type: "FOLLOW_UP",
         created_by: firebaseUser.uid,
+        // 생성 시점 child 회의의 member_uids 스냅샷 (LIST 쿼리 보안 규칙 제약 우회용)
+        member_uids: [firebaseUser.uid],
         created_at: now,
       });
     }
