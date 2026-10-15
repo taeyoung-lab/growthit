@@ -38,13 +38,20 @@ function DashboardContent() {
   useEffect(() => {
     if (!firebaseUser || !profile) return;
     (async () => {
-      const mQuery = query(
-        collection(db, "meetings"),
-        where("member_uids", "array-contains", firebaseUser.uid),
-        orderBy("meeting_date", "desc")
-      );
+      // 관리자(SUPER_ADMIN/ADMIN)는 조직 전체 회의록을, 일반 사용자는 본인이 멤버(member_uids)인 회의록만 봅니다.
+      // 관리자 쿼리는 보안 규칙의 토큰 클레임(org_role) 분기로 허용됩니다. 복합 인덱스가 필요 없도록
+      // 서버 정렬(orderBy) 대신 아래에서 클라이언트 정렬합니다.
+      const mQuery = isAdmin
+        ? query(collection(db, "meetings"), where("organization_id", "==", profile.organization_id))
+        : query(
+            collection(db, "meetings"),
+            where("member_uids", "array-contains", firebaseUser.uid),
+            orderBy("meeting_date", "desc")
+          );
       const mSnap = await getDocs(mQuery);
-      const loadedMeetings = mSnap.docs.map((d) => d.data() as Meeting);
+      const loadedMeetings = mSnap.docs
+        .map((d) => d.data() as Meeting)
+        .sort((a, b) => (a.meeting_date < b.meeting_date ? 1 : a.meeting_date > b.meeting_date ? -1 : 0));
       setMeetings(loadedMeetings);
 
       const qQuery = query(
