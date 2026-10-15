@@ -121,59 +121,86 @@ function MeetingDetailContent({ meetingId }: { meetingId: string }) {
 
   const loadAll = useCallback(async () => {
     if (!firebaseUser) return;
+
+    // 조회 하나가 권한 오류 등으로 실패해도 나머지 영역이 통째로 비지 않도록, 각 조회를 따로 감싸고
+    // 어떤 조회가 실패했는지 콘솔에 이름을 남깁니다(2026-10-15).
+    async function safe<T>(label: string, fn: () => Promise<T>): Promise<T | null> {
+      try {
+        return await fn();
+      } catch (e) {
+        console.error(`[MeetingDetail] ${label} 조회 실패:`, e);
+        return null;
+      }
+    }
+
     const mSnap = await getDoc(doc(db, "meetings", meetingId));
     if (!mSnap.exists()) return;
     setMeeting(mSnap.data() as Meeting);
 
-    const permSnap = await getDoc(doc(db, "meetings", meetingId, "permissions", firebaseUser.uid));
-    setMyRole(permSnap.exists() ? (permSnap.data().role as string) : null);
+    const permSnap = await safe("내 권한(permissions 문서)", () =>
+      getDoc(doc(db, "meetings", meetingId, "permissions", firebaseUser.uid))
+    );
+    setMyRole(permSnap && permSnap.exists() ? (permSnap.data().role as string) : null);
 
-    const summarySnap = await getDoc(doc(db, "meetingSummaries", meetingId));
-    setSummary(summarySnap.exists() ? (summarySnap.data() as MeetingSummary) : null);
+    const summarySnap = await safe("회의 요약(meetingSummaries)", () => getDoc(doc(db, "meetingSummaries", meetingId)));
+    setSummary(summarySnap && summarySnap.exists() ? (summarySnap.data() as MeetingSummary) : null);
 
     const [aSnap, qSnap, permsSnap] = await Promise.all([
-      getDocs(query(collection(db, "actionItems"), where("meeting_id", "==", meetingId))),
-      getDocs(query(collection(db, "questions"), where("meeting_id", "==", meetingId), orderBy("created_at", "asc"))),
-      getDocs(collection(db, "meetings", meetingId, "permissions")),
+      safe("향후추진과제(actionItems)", () =>
+        getDocs(query(collection(db, "actionItems"), where("meeting_id", "==", meetingId)))
+      ),
+      safe("문답(questions)", () =>
+        getDocs(query(collection(db, "questions"), where("meeting_id", "==", meetingId), orderBy("created_at", "asc")))
+      ),
+      safe("참여자 목록(permissions)", () => getDocs(collection(db, "meetings", meetingId, "permissions"))),
     ]);
-    setActionItems(aSnap.docs.map((d) => ({ id: d.id, ...d.data() } as ActionItem)));
-    const qs = qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Question));
+    setActionItems(aSnap ? aSnap.docs.map((d) => ({ id: d.id, ...d.data() } as ActionItem)) : []);
+    const qs = qSnap ? qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Question)) : [];
     setQuestions(qs);
-    setParticipants(permsSnap.docs.map((d) => d.data() as MeetingUserPermission));
+    setParticipants(permsSnap ? permsSnap.docs.map((d) => d.data() as MeetingUserPermission) : []);
 
     const answerEntries = await Promise.all(
       qs.map(async (q) => {
-        const ansSnap = await getDocs(query(collection(db, "questions", q.id, "answers"), orderBy("answered_at", "asc")));
-        return [q.id, ansSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Answer))] as const;
+        const ansSnap = await safe("답변(answers)", () =>
+          getDocs(query(collection(db, "questions", q.id, "answers"), orderBy("answered_at", "asc")))
+        );
+        return [q.id, ansSnap ? ansSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Answer)) : []] as const;
       })
     );
     setAnswersByQuestion(Object.fromEntries(answerEntries));
 
     // 이전/이후 회의 연결 — 회의 작성 시 "이전 회의와 연결"로 저장된 관계를 양방향으로 표시합니다.
-    // (지금까지는 저장만 되고 상세 화면에서 전혀 보이지 않던 부분)
     const [asChildSnap, asParentSnap] = await Promise.all([
-      getDocs(query(collection(db, "meetingRelations"), where("child_meeting_id", "==", meetingId))),
-      getDocs(query(collection(db, "meetingRelations"), where("parent_meeting_id", "==", meetingId))),
+      safe("연결된 회의(child)", () =>
+        getDocs(query(collection(db, "meetingRelations"), where("child_meeting_id", "==", meetingId)))
+      ),
+      safe("연결된 회의(parent)", () =>
+        getDocs(query(collection(db, "meetingRelations"), where("parent_meeting_id", "==", meetingId)))
+      ),
     ]);
     const relations = [
-      ...asChildSnap.docs.map((d) => ({ rel: d.data() as MeetingRelation, direction: "이전 회의" as const, otherId: (d.data() as MeetingRelation).parent_meeting_id })),
-      ...asParentSnap.docs.map((d) => ({ rel: d.data() as MeetingRelation, direction: "후속 회의" as const, otherId: (d.data() as MeetingRelation).child_meeting_id })),
+      ...(asChildSnap ? asChildSnap.docs : []).map((d) => ({ direction: "이전 회의" as const, otherId: (d.data() as MeetingRelation).parent_meeting_id })),
+      ...(asParentSnap ? asParentSnap.docs : []).map((d) => ({ direction: "후속 회의" as const, otherId: (d.data() as MeetingRelation).child_meeting_id })),
     ];
-    const relatedDocs = await Promise.all(relations.map((r) => getDoc(doc(db, "meetings", r.otherId))));
+    const relatedDocs = await Promise.all(
+      relations.map((r) => safe("연결된 회의 상세", () => getDoc(doc(db, "meetings", r.otherId))))
+    );
     setRelatedMeetings(
       relations
         .map((r, i) => {
           const otherSnap = relatedDocs[i];
-          if (!otherSnap.exists()) return null;
+          if (!otherSnap || !otherSnap.exists()) return null;
           const other = otherSnap.data() as Meeting;
           return { direction: r.direction, meetingId: r.otherId, title: other.meeting_title, date: other.meeting_date };
         })
         .filter((v): v is RelatedMeetingLink => v !== null)
     );
 
-    // 결정사항 (16장) — 타입/보안규칙은 있었지만 화면이 없던 부분
-    const decisionsSnap = await getDocs(query(collection(db, "decisions"), where("meeting_id", "==", meetingId)));
-    setDecisions(decisionsSnap.docs.map((d) => d.data() as Decision));
+    // 결정사항 (16장)
+    const decisionsSnap = await safe("결정사항(decisions)", () =>
+      getDocs(query(collection(db, "decisions"), where("meeting_id", "==", meetingId)))
+    );
+    setDecisions(decisionsSnap ? decisionsSnap.docs.map((d) => d.data() as Decision) : []);
   }, [firebaseUser, meetingId]);
 
   async function loadDecisionHistory(decisionId: string) {
