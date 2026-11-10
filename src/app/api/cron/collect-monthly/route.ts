@@ -1,4 +1,3 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { getAdminDb } from "@/lib/firebase/admin";
@@ -33,6 +32,14 @@ function kstPrevYearMonth(now = new Date()): string {
     m = 12;
   }
   return `${y}-${String(m).padStart(2, "0")}`;
+}
+
+// 수집 시각(collected_at, ms)이 그 달의 마지막 날(KST) 이전이면 true — 월이 끝나기 전에 모은 부분 데이터입니다.
+function isCollectedBeforeMonthEnd(collectedAt: unknown, yearMonth: string): boolean {
+  if (typeof collectedAt !== "number") return false; // 시각을 모르면 기존처럼 건드리지 않음
+  const [y, m] = yearMonth.split("-").map(Number);
+  const monthEndKstMs = Date.UTC(y, m, 1) - 9 * 60 * 60 * 1000; // 다음 달 1일 00:00 KST
+  return collectedAt < monthEndKstMs;
 }
 
 function hostOf(url: string): string {
@@ -82,7 +89,10 @@ async function pickBrand(yearMonth: string, onlyBrandId?: string | null) {
     if (ac && ac.year_month === yearMonth && ac.status === "SUCCESS") continue;
     if (attempts >= MAX_ATTEMPTS) continue;
     const existing = await db.collection("brandMonthlyData").doc(`${brand.id}_${yearMonth}`).get();
-    if (existing.exists) continue; // 수동 수집·백필로 이미 채워진 달은 건드리지 않음
+    // 수동 수집·백필로 이미 채워진 달은 건드리지 않음. 단, 월말 이전에 수집된 "진행 중 달" 부분 데이터
+    // (2026-11-10 발견: 우지커피 2026-10이 월초 약 20%만 수집된 채 남아 자동 수집이 영구히 건너뜀)는
+    // 확정 데이터가 아니므로 다시 수집 대상으로 봅니다.
+    if (existing.exists && !isCollectedBeforeMonthEnd(existing.data()?.collected_at, yearMonth)) continue;
     candidates.push({ brand, attempts });
   }
   candidates.sort((a, b) => a.attempts - b.attempts || a.brand.created_at - b.brand.created_at);
