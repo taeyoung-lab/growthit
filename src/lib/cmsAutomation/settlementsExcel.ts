@@ -54,13 +54,18 @@ function normalize(s: string): string {
 export function settlementsRowsToJson(rows: string[][]): SettlementsFromExcel {
   if (rows.length < 2) throw new Error("정산 엑셀에 데이터 행이 없습니다.");
 
-  const header = rows[0].map(normalize);
+  // 헤더 행 찾기: 보통 첫 행이지만, 제목 행이 위에 끼는 양식도 있어 위쪽 5행 안에서 "매장명"이 있는 행을 씁니다.
+  let headerIdx = rows.slice(0, 5).findIndex((r) => r.map(normalize).includes("매장명"));
+  if (headerIdx < 0) headerIdx = 0;
+  const header = rows[headerIdx].map(normalize);
   const colOf = {} as Record<keyof SettlementStoreRow, number>;
   for (const c of COLUMNS) {
     const idx = header.findIndex((h) => (c.match === "exact" ? h === c.header : h.startsWith(c.header)));
     if (idx < 0) {
       // 컬럼 구성이 바뀌었는데 위치만 믿고 읽으면 엉뚱한 값이 실측값처럼 저장됩니다 — 바로 실패시킵니다.
-      throw new Error(`정산 엑셀 헤더에서 "${c.header}" 컬럼을 찾지 못했습니다(CMS 엑셀 양식이 바뀌었는지 확인 필요).`);
+      throw new Error(
+        `정산 엑셀 헤더에서 "${c.header}" 컬럼을 찾지 못했습니다(CMS 엑셀 양식이 바뀌었는지 확인 필요). 읽은 헤더(${headerIdx + 1}행): ${header.join(" | ").slice(0, 300)}`
+      );
     }
     colOf[c.field] = idx;
   }
@@ -87,7 +92,7 @@ export function settlementsRowsToJson(rows: string[][]): SettlementsFromExcel {
     };
   };
 
-  const body = rows.slice(1).filter((r) => (r[colOf.storeNm] ?? "").trim() !== "");
+  const body = rows.slice(headerIdx + 1).filter((r) => (r[colOf.storeNm] ?? "").trim() !== "");
   const totalRow = body.find((r) => r[colOf.storeNm].trim() === "전체");
   if (!totalRow) throw new Error('정산 엑셀에서 "전체" 합계 행을 찾지 못했습니다.');
 
