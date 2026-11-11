@@ -21,6 +21,14 @@ export async function loadReportInput(db: Firestore, brand: ReportBrand, yearMon
     throw new ReportDataMissingError(`${yearMonth} 데이터가 아직 수집되지 않았습니다. 먼저 데이터를 수집해주세요.`);
   }
   const cur = curSnap.data() as BrandMonthlyData;
+  // 문서는 있어도 매출·앱결제 집계가 전혀 없으면(수집 제외 브랜드의 빈 문서, CMS 집계가 빈 달 등) 리포트를 만들지
+  // 않습니다. 빈 값으로 만들면 "-100%" 같은 잘못된 숫자가 담긴 빈 리포트가 발행됩니다(2026-11-11 처갓집 사례).
+  const curSnapshot = snapshotFromData(yearMonth, cur.data ?? {});
+  if (curSnapshot.totalPay == null && curSnapshot.appPay == null) {
+    throw new ReportDataMissingError(
+      `${yearMonth} 수집 데이터에 매출·앱결제 집계가 없어 리포트를 만들 수 없습니다. 수집 제외 브랜드이거나 CMS 집계가 비어 있는 달입니다. 다시 수집해도 비어 있으면 CMS 쪽을 확인해주세요.`
+    );
+  }
 
   const priorYms = Array.from({ length: HISTORY_MONTHS }, (_, i) => monthsBefore(yearMonth, HISTORY_MONTHS - i));
   const priorRefs = priorYms.map((ym) => db.collection("brandMonthlyData").doc(`${brandId}_${ym}`));
