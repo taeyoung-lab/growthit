@@ -8,18 +8,22 @@ import type { BrandAutoCollect, BrandCredentials, ReportBrand } from "@/lib/type
 // 자동 월간 수집(2026-10-07) — 매월 초, 활성 브랜드의 "전월" 데이터를 CMS에서 자동으로 수집해
 // brandMonthlyData에 저장합니다(source "AUTO"). PPT 발행은 하지 않습니다(발행은 계속 담당자 요청 시).
 //
-// 실행 방식: vercel.json의 cron이 매월 초 며칠 동안 하루 한 번 이 주소를 호출하고, 한 번 호출에 브랜드
-// "한 곳"만 처리합니다 — 로그인+수집이 브랜드당 최대 약 2분(대형 브랜드)이라 서버리스 시간 제한(120초)
-// 안에서 여러 브랜드를 묶어 처리할 수 없기 때문입니다. 아직 전월 데이터가 없는 브랜드를 하루에 하나씩
-// 채우고, 다 채웠으면 아무것도 하지 않고 끝납니다. 실패한 브랜드는 다음 호출에서 다른 브랜드를 먼저 처리한
-// 뒤 최대 3회까지 다시 시도합니다. 수집 결과는 브랜드 문서의 auto_collect에 남아 브랜드 관리 화면에 보입니다.
+// 실행 방식: vercel.json의 cron이 매월 초 며칠 동안 하루 한 번(12:30 KST 무렵) 이 주소를 호출하고, 한 번
+// 호출 안에서 브랜드를 "하나 끝나면 다음 하나" 순서로 이어서 처리합니다. 로그인+수집이 브랜드당 최대 약
+// 2분(대형 브랜드)이라, 다음 브랜드는 이번 실행의 경과 시간이 NEXT_BRAND_START_LIMIT_MS 미만일 때만 시작합니다
+// (최악의 경우에도 maxDuration 안에 끝나도록). 시간이 모자라 못 한 브랜드는 다음 날 호출에서 이어서 합니다.
+// 같은 실행에서 실패한 브랜드는 다시 시도하지 않고(다음 호출에서 최대 3회까지 재시도), 다 채웠으면 아무것도
+// 하지 않고 끝납니다. 수집 결과는 브랜드 문서의 auto_collect에 남아 브랜드 관리 화면에 "00월 수집 완료"로 보입니다.
 //
 // 인증: Vercel Cron이 보내는 `Authorization: Bearer ${CRON_SECRET}`(환경변수 CRON_SECRET 필요) 또는
 // 로그인한 슈퍼 관리자(수동 실행용 POST)만 호출할 수 있습니다.
-export const maxDuration = 120;
+export const maxDuration = 300;
 export const runtime = "nodejs";
 
 const MAX_ATTEMPTS = 3;
+// 이번 실행 시작 후 이 시간(ms)이 지나면 새 브랜드를 시작하지 않음. 대형 브랜드 1곳이 최대 약 120초이므로
+// 150초 + 120초 = 270초 < maxDuration(300초).
+const NEXT_BRAND_START_LIMIT_MS = 150_000;
 // 월별 수집·리포트 대상에서 제외하기로 확정한 브랜드(처갓집양념치킨: 분리형 CMS·정산 미발생, 2026-10-06 결정).
 const EXCLUDED_CMS_HOSTS = ["cheogajip-cms.growthit.co.kr"];
 
@@ -72,14 +76,15 @@ async function authorize(req: NextRequest): Promise<{ ok: true } | { ok: false; 
 }
 
 // 이번 실행에서 처리할 브랜드를 고릅니다: 활성 + 계정 저장됨 + 제외 대상 아님 + 서비스 오픈 이후 +
-// 백필 진행 중 아님 + 전월 데이터 없음 + (이번 달 실패가 3회 미만). 시도 횟수가 적은 브랜드 먼저.
-async function pickBrand(yearMonth: string, onlyBrandId?: string | null) {
+// 백필스때 진행 중 아님 + 전월 데이터 없음 + (이번 달 실패가 3회 미만). 시도 횟수가 적은 브랜드 먼저.
+async function pickBrand(yearMonth: string, onlyBrandId?: string | null, skipIds: Set<string> = new Set()) {
   const db = getAdminDb();
   const snap = await db.collection("brands").where("brand_status", "==", "ACTIVE").get();
   const candidates: { brand: ReportBrand; attempts: number }[] = [];
   for (const d of snap.docs) {
     const brand = { ...(d.data() as ReportBrand), id: d.id };
     if (onlyBrandId && brand.id !== onlyBrandId) continue;
+    if (skipIds.has(brand.id)) continue; // 이번 실행에서 이미 처리(성공/실패)한 브랜드
     if (!brand.has_saved_credentials) continue;
     if (EXCLUDED_CMS_HOSTS.includes(hostOf(brand.cms_url))) continue;
     if (brand.service_open_date && brand.service_open_date.slice(0, 7) > yearMonth) continue; // 아직 오픈 전
@@ -104,10 +109,42 @@ async function run(req: NextRequest, onlyBrandId?: string | null, forcedYm?: str
   if (!auth.ok) return auth.res;
 
   const yearMonth = forcedYm && /^\d{4}-\d{2}$/.test(forcedYm) ? forcedYm : kstPrevYearMonth();
-  const { picked, remaining } = await pickBrand(yearMonth, onlyBrandId);
-  if (!picked) return NextResponse.json({ ok: true, year_month: yearMonth, done: true, message: "수집할 브랜드가 없습니다." });
+  const startedAt = Date.now();
+  const handled = new Set<string>();
+  const results: { brand: string; ok: boolean; error?: string }[] = [];
 
-  const { brand, attempts } = picked;
+  // 브랜드 하나가 끝나면(성공/실패) 다음 브랜드를 이어서 처리. 단일 브랜드 지정(onlyBrandId) 때는 한 번만.
+  for (;;) {
+    const { picked, remaining } = await pickBrand(yearMonth, onlyBrandId, handled);
+    if (!picked) {
+      return NextResponse.json({
+        ok: true,
+        year_month: yearMonth,
+        done: true,
+        message: results.length ? "이번 실행에서 수집 대상 브랜드를 모두 처리했습니다." : "수집할 브랜드가 없습니다.",
+        results,
+      });
+    }
+    handled.add(picked.brand.id);
+    results.push(await collectOne(picked.brand, picked.attempts, yearMonth));
+    if (onlyBrandId) break;
+    if (remaining - 1 <= 0) continue; // 남은 후보 없음 → 다음 루프에서 done 응답
+    if (Date.now() - startedAt >= NEXT_BRAND_START_LIMIT_MS) {
+      return NextResponse.json({
+        ok: true,
+        year_month: yearMonth,
+        done: false,
+        message: "시간 제한 때문에 남은 브랜드는 다음 실행에서 이어서 처리합니다.",
+        remaining: remaining - 1,
+        results,
+      });
+    }
+  }
+  return NextResponse.json({ ok: results.every((r) => r.ok), year_month: yearMonth, results });
+}
+
+// 브랜드 한 곳 수집 + 결과(auto_collect) 기록.
+async function collectOne(brand: ReportBrand, attempts: number, yearMonth: string): Promise<{ brand: string; ok: boolean; error?: string }> {
   const db = getAdminDb();
   const brandRef = db.collection("brands").doc(brand.id);
   const credsSnap = await db.collection("brandCredentials").doc(brand.id).get();
@@ -118,7 +155,7 @@ async function run(req: NextRequest, onlyBrandId?: string | null, forcedYm?: str
 
   if (!credsSnap.exists) {
     await record({ status: "FAILED", attempts: MAX_ATTEMPTS, error: "저장된 CMS 계정 정보가 없습니다." });
-    return NextResponse.json({ ok: false, year_month: yearMonth, brand: brand.brand_name, error: "계정 정보 없음" });
+    return { brand: brand.brand_name, ok: false, error: "계정 정보 없음" };
   }
   try {
     await collectAndStoreMonth({
@@ -130,12 +167,12 @@ async function run(req: NextRequest, onlyBrandId?: string | null, forcedYm?: str
       source: "AUTO",
     });
     await record({ status: "SUCCESS" });
-    return NextResponse.json({ ok: true, year_month: yearMonth, brand: brand.brand_name, remaining: remaining - 1 });
+    return { brand: brand.brand_name, ok: true };
   } catch (e) {
     const msg = (e instanceof Error ? `${e.name}: ${e.message}` : "알 수 없는 오류").slice(0, 240);
     console.error(`[collect-monthly] ${brand.brand_name} ${yearMonth} 실패`, e);
     await record({ status: "FAILED", error: msg }).catch(() => undefined);
-    return NextResponse.json({ ok: false, year_month: yearMonth, brand: brand.brand_name, error: msg, remaining });
+    return { brand: brand.brand_name, ok: false, error: msg };
   }
 }
 
